@@ -296,13 +296,26 @@ export default function App() {
   const addLoan = () => {
     const amount = parseFloat(lAmt);
     if (!amount || amount <= 0 || !lName.trim()) return;
-    const newLoan = { id: crypto.randomUUID(), name: lName.trim(), amount, date: lDate, note: lNote, status: 'pending' };
+    const newLoan = { id: crypto.randomUUID(), name: lName.trim(), amount, repaid_amount: 0, date: lDate, note: lNote, status: 'pending' };
     setLoans(prev => [newLoan, ...prev]);
     setLName(""); setLAmt(""); setLNote(""); setLDate(localToday());
   };
 
   const markLoanRepaid = (id) => {
-    setLoans(prev => prev.map(l => l.id === id ? { ...l, status: 'repaid' } : l));
+    setLoans(prev => prev.map(l => l.id === id ? { ...l, repaid_amount: l.amount, status: 'repaid' } : l));
+  };
+
+  const repayLoan = (id, amtStr) => {
+    const amt = parseFloat(amtStr);
+    if (!amt || amt <= 0) return;
+    setLoans(prev => prev.map(l => {
+      if (l.id === id) {
+        const newRepaid = (l.repaid_amount || 0) + amt;
+        const newStatus = newRepaid >= l.amount ? 'repaid' : 'pending';
+        return { ...l, repaid_amount: newRepaid, status: newStatus };
+      }
+      return l;
+    }));
   };
 
   const delLoan = (id) => {
@@ -763,13 +776,26 @@ export default function App() {
                             {l.note && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>{l.note}</div>}
                           </div>
                           <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 15, fontFamily: "var(--font-mono)", color: "var(--rose)" }}>{currency(l.amount)}</div>
+                            <div style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>Total: {currency(l.amount)}</div>
+                            <div style={{ fontSize: 15, fontFamily: "var(--font-mono)", color: "var(--rose)", marginTop: 2 }}>Left: {currency(l.amount - (l.repaid_amount || 0))}</div>
                             <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>{fmtDate(l.date)}</div>
                           </div>
                         </div>
-                        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                          <TealButton onClick={() => markLoanRepaid(l.id)} style={{ flex: 1, padding: "8px 0", fontSize: 12 }}>✓ Mark Repaid</TealButton>
-                          <button onClick={() => delLoan(l.id)} style={{ background: "rgba(255,255,255,.05)", border: "none", borderRadius: "var(--radius-sm)", color: "var(--text-dim)", width: 40, cursor: "pointer", transition: "all .2s" }}>✕</button>
+
+                        {/* Progress Bar */}
+                        <div style={{ height: 4, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden", margin: "8px 0" }}>
+                           <div style={{ height: "100%", background: "var(--teal)", width: `${Math.min(100, ((l.repaid_amount || 0) / l.amount) * 100)}%`, borderRadius: 2, transition: "width .3s ease" }} />
+                        </div>
+
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <FInput type="number" placeholder="Amt" id={`repay-${l.id}`} style={{ padding: "6px 10px", fontSize: 12, flex: 1 }} />
+                          <TealButton onClick={() => {
+                            const input = document.getElementById(`repay-${l.id}`);
+                            repayLoan(l.id, input.value);
+                            input.value = "";
+                          }} style={{ padding: "6px 12px", fontSize: 11 }}>Repay</TealButton>
+                          <TealButton onClick={() => markLoanRepaid(l.id)} style={{ padding: "6px 10px", fontSize: 11 }} title="Mark fully repaid">✓ Full</TealButton>
+                          <button onClick={() => delLoan(l.id)} style={{ background: "rgba(255,255,255,.05)", border: "none", borderRadius: "var(--radius-sm)", color: "var(--text-dim)", padding: "0 10px", cursor: "pointer", transition: "all .2s" }}>✕</button>
                         </div>
                       </div>
                     ))}
