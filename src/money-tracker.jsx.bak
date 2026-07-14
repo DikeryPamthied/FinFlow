@@ -1,8 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { supabase } from "./supabaseClient";
-import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import jsPDF from 'jspdf';
-import 'jspdf-autotable';
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 const localToday = () => {
@@ -14,7 +11,7 @@ const fmtDate = (iso) => parseLocal(iso).toLocaleDateString("en-US", { month: "s
 const fmtMonth = (iso) => parseLocal(iso).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 const monthKey = (iso) => { const d = parseLocal(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const monthKeyLabel = (k) => { const [y, m] = k.split("-"); return new Date(+y, +m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }); };
-const currency = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(n || 0);
+const currency = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(n || 0);
 
 // ─── Supabase helpers ─────────────────────────────────────────────────────────
 async function loadData() {
@@ -164,8 +161,6 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [salaryEntries, setSalaryEntries] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [goals, setGoals] = useState([]);
-  const [loans, setLoans] = useState([]);
   const [tab, setTab] = useState("dashboard");
   const [openMonth, setOpenMonth] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
@@ -188,36 +183,11 @@ export default function App() {
   const [expStart, setExpStart] = useState(localToday);
   const [expEnd, setExpEnd] = useState(localToday);
 
-  // Goals form
-  const [gName, setGName] = useState("");
-  const [gTarget, setGTarget] = useState("");
-  const [gColor, setGColor] = useState("var(--gold)");
-
-  // Lending form
-  const [lName, setLName] = useState("");
-  const [lAmt, setLAmt] = useState("");
-  const [lDate, setLDate] = useState(localToday);
-  const [lNote, setLNote] = useState("");
-
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
     return () => subscription.unsubscribe();
   }, []);
-
-  useEffect(() => {
-    const savedGoals = JSON.parse(localStorage.getItem('finflow_goals') || '[]');
-    const savedLoans = JSON.parse(localStorage.getItem('finflow_loans') || '[]');
-    setGoals(savedGoals);
-    setLoans(savedLoans);
-  }, []);
-
-  useEffect(() => {
-    if (loaded) {
-      localStorage.setItem('finflow_goals', JSON.stringify(goals));
-      localStorage.setItem('finflow_loans', JSON.stringify(loans));
-    }
-  }, [goals, loans, loaded]);
 
   useEffect(() => {
     if (!session) return;
@@ -275,41 +245,7 @@ export default function App() {
     if (!error) setExpenses(prev => prev.filter(e => e.id !== id));
   };
 
-  const addGoal = () => {
-    const target = parseFloat(gTarget);
-    if (!target || target <= 0 || !gName.trim()) return;
-    const newGoal = { id: crypto.randomUUID(), name: gName.trim(), target_amount: target, current_amount: 0, color: gColor };
-    setGoals(prev => [newGoal, ...prev]);
-    setGName(""); setGTarget("");
-  };
-
-  const delGoal = (id) => {
-    setGoals(prev => prev.filter(e => e.id !== id));
-  };
-
-  const fundGoal = (goal, amtStr) => {
-    const amt = parseFloat(amtStr);
-    if (!amt || amt <= 0) return;
-    setGoals(prev => prev.map(g => g.id === goal.id ? { ...g, current_amount: g.current_amount + amt } : g));
-  };
-
-  const addLoan = () => {
-    const amount = parseFloat(lAmt);
-    if (!amount || amount <= 0 || !lName.trim()) return;
-    const newLoan = { id: crypto.randomUUID(), name: lName.trim(), amount, date: lDate, note: lNote, status: 'pending' };
-    setLoans(prev => [newLoan, ...prev]);
-    setLName(""); setLAmt(""); setLNote(""); setLDate(localToday());
-  };
-
-  const markLoanRepaid = (id) => {
-    setLoans(prev => prev.map(l => l.id === id ? { ...l, status: 'repaid' } : l));
-  };
-
-  const delLoan = (id) => {
-    setLoans(prev => prev.filter(l => l.id !== id));
-  };
-
-  const downloadStatement = (format = 'csv') => {
+  const downloadStatement = () => {
     let s = [...salaryEntries], e = [...expenses];
     if (expType === "Month" && expMonth) {
       s = s.filter(x => monthKey(x.date) === expMonth);
@@ -334,36 +270,16 @@ export default function App() {
       return b[0].localeCompare(a[0]);
     });
     
-    if (format === 'csv') {
-      const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement("a");
-      const url = URL.createObjectURL(blob);
-      link.setAttribute("href", url);
-      link.setAttribute("download", `Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.csv`);
-      link.style.visibility = 'hidden';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } else if (format === 'pdf') {
-      const doc = new jsPDF();
-      doc.setFontSize(22);
-      doc.text("FinFlow Statement", 14, 22);
-      doc.setFontSize(11);
-      doc.setTextColor(100);
-      doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 30);
-      doc.text(`Period: ${expType === "Month" ? monthKeyLabel(expMonth) : `${fmtDate(expStart)} to ${fmtDate(expEnd)}`}`, 14, 36);
-      
-      doc.autoTable({
-        startY: 42,
-        head: [rows[0]],
-        body: rows.slice(1),
-        theme: 'grid',
-        headStyles: { fillColor: [240, 192, 64], textColor: [5, 5, 8] },
-        styles: { fontSize: 9 }
-      });
-      doc.save(`Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.pdf`);
-    }
+    const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleSignOut = () => supabase.auth.signOut();
@@ -377,8 +293,6 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", icon: "⊞" },
     { id: "expenses", label: "Expenses", icon: "◎" },
     { id: "savings", label: "Savings", icon: "◈" },
-    { id: "goals", label: "Goals", icon: "🎯" },
-    { id: "lending", label: "Lending", icon: "🤝" },
     { id: "history", label: "History", icon: "≡" },
   ];
 
@@ -496,38 +410,6 @@ export default function App() {
                 { color: "var(--violet)", grad: "var(--grad-violet)", icon: "📈", label: "Total Savings", value: currency(T.savings), sub: `Inv: ${currency(T.savInv)}`, pct: T.savings > 0 ? 100 : 0, pctLabel: "↑ Growing", delay: "delay-3" },
                 { color: "var(--rose)", grad: "var(--grad-rose)", icon: "🧾", label: "Total Spent", value: currency(T.spent), sub: `${expenses.length} expenses`, pct: wPct, pctLabel: `${wPct.toFixed(0)}% of budget`, delay: "delay-4" },
               ].map(c => <MetricCard key={c.label} {...c} />)}
-            </div>
-
-            {/* Analytics Dashboard */}
-            <div className="anim-fade-up" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 14, marginBottom: 28 }}>
-              <Panel title="Income vs Expenses (Monthly)">
-                <div style={{ width: '100%', height: 250 }}>
-                  <ResponsiveContainer>
-                    <LineChart data={groups.slice(0, 6).reverse().map(g => ({ name: monthKeyLabel(g.key).split(" ")[0], Income: g.entries.reduce((s,e)=>s+e.amount,0), Spent: g.expenses.reduce((s,e)=>s+e.amount,0) }))}>
-                      <XAxis dataKey="name" stroke="var(--text-dim)" fontSize={10} tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} />
-                      <Line type="monotone" dataKey="Income" stroke="var(--gold)" strokeWidth={3} dot={{ r: 4, fill: "var(--bg)", strokeWidth: 2 }} />
-                      <Line type="monotone" dataKey="Spent" stroke="var(--rose)" strokeWidth={3} dot={{ r: 4, fill: "var(--bg)", strokeWidth: 2 }} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </Panel>
-              
-              <Panel title="Expense Breakdown (All Time)">
-                <div style={{ width: '100%', height: 250 }}>
-                  <ResponsiveContainer>
-                    <PieChart>
-                      <Pie data={Object.entries(expenses.reduce((acc, e) => { acc[e.tag] = (acc[e.tag] || 0) + e.amount; return acc; }, {})).map(([name, value]) => ({ name, value }))} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
-                        {Object.entries(expenses.reduce((acc, e) => { acc[e.tag] = (acc[e.tag] || 0) + e.amount; return acc; }, {})).map((entry, index) => {
-                           const colors = ["var(--gold)", "var(--teal)", "var(--violet)", "var(--rose)", "#F97316", "#3B82F6", "#EC4899", "#8B5CF6"];
-                           return <Cell key={`cell-${index}`} fill={colors[index % colors.length]} stroke="var(--bg)" strokeWidth={2} />
-                        })}
-                      </Pie>
-                      <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} itemStyle={{ color: "var(--text)" }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </Panel>
             </div>
 
             {/* Add Salary Panel */}
@@ -678,128 +560,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ══ GOALS ══ */}
-        {tab === "goals" && (
-          <div key="goals">
-            <PageHeader title="Goals" sub="Custom Financial Targets" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(290px,1fr))", gap: 18, marginBottom: 8 }}>
-              <Panel title="Create Goal" style={{ zIndex: 20 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <FInput placeholder="Goal name (e.g. New Car)…" value={gName} onChange={e => setGName(e.target.value)} />
-                  <FInput type="number" inputMode="decimal" placeholder="Target Amount" value={gTarget} onChange={e => setGTarget(e.target.value)} />
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {["var(--gold)", "var(--teal)", "var(--violet)", "var(--rose)", "#3B82F6", "#EC4899"].map(c => (
-                      <button key={c} onClick={() => setGColor(c)} style={{ width: 24, height: 24, borderRadius: '50%', background: c, border: gColor === c ? '2px solid white' : '2px solid transparent', cursor: "pointer" }} />
-                    ))}
-                  </div>
-                  <GoldButton onClick={addGoal} disabled={!gName.trim() || !gTarget || parseFloat(gTarget) <= 0}>+ Create Goal</GoldButton>
-                </div>
-              </Panel>
-
-              <Panel title="Your Goals">
-                {goals.length === 0 ? <EmptyState icon="🎯" text="No goals set yet" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                    {goals.map(g => {
-                      const pct = Math.min(100, (g.current_amount / g.target_amount) * 100);
-                      return (
-                        <div key={g.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px", position: "relative", overflow: "hidden" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                            <div style={{ fontSize: 15, fontWeight: 700 }}>{g.name}</div>
-                            <button className="ff-del" onClick={() => delGoal(g.id)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 11 }}>✕</button>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
-                            <span>{currency(g.current_amount)}</span>
-                            <span>{currency(g.target_amount)}</span>
-                          </div>
-                          <div style={{ height: 6, background: "rgba(255,255,255,.06)", borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
-                            <div style={{ height: "100%", background: g.color || "var(--gold)", width: `${pct}%`, borderRadius: 3, transition: "width .5s ease" }} />
-                          </div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <FInput type="number" placeholder="Amt" id={`fund-${g.id}`} style={{ padding: "6px 10px", fontSize: 12 }} />
-                            <TealButton onClick={() => {
-                              const input = document.getElementById(`fund-${g.id}`);
-                              fundGoal(g, input.value);
-                              input.value = "";
-                            }} style={{ padding: "6px 12px", fontSize: 11 }}>Fund</TealButton>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </Panel>
-            </div>
-          </div>
-        )}
-
-        {/* ══ LENDING ══ */}
-        {tab === "lending" && (
-          <div key="lending">
-            <PageHeader title="Lending" sub="Track money lent to friends & family" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(290px,1fr))", gap: 18, marginBottom: 8 }}>
-              
-              {/* New Loan Panel */}
-              <Panel title="New Loan" style={{ zIndex: 20 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <FInput placeholder="Person's Name…" value={lName} onChange={e => setLName(e.target.value)} />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <FInput type="number" inputMode="decimal" placeholder="Amount" value={lAmt} onChange={e => setLAmt(e.target.value)} style={{ flex: 1 }} />
-                    <FinDateSelector value={lDate} onChange={setLDate} />
-                  </div>
-                  <FInput placeholder="Note (Optional)…" value={lNote} onChange={e => setLNote(e.target.value)} />
-                  <GoldButton onClick={addLoan} disabled={!lName.trim() || !lAmt || parseFloat(lAmt) <= 0}>+ Lend Money</GoldButton>
-                </div>
-              </Panel>
-
-              {/* Active Loans Panel */}
-              <Panel title="Active Loans">
-                {loans.filter(l => l.status === 'pending').length === 0 ? <EmptyState icon="🤝" text="No active loans" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {loans.filter(l => l.status === 'pending').map(l => (
-                      <div key={l.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                          <div>
-                            <div style={{ fontSize: 15, fontWeight: 700 }}>{l.name}</div>
-                            {l.note && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>{l.note}</div>}
-                          </div>
-                          <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 15, fontFamily: "var(--font-mono)", color: "var(--rose)" }}>{currency(l.amount)}</div>
-                            <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>{fmtDate(l.date)}</div>
-                          </div>
-                        </div>
-                        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                          <TealButton onClick={() => markLoanRepaid(l.id)} style={{ flex: 1, padding: "8px 0", fontSize: 12 }}>✓ Mark Repaid</TealButton>
-                          <button onClick={() => delLoan(l.id)} style={{ background: "rgba(255,255,255,.05)", border: "none", borderRadius: "var(--radius-sm)", color: "var(--text-dim)", width: 40, cursor: "pointer", transition: "all .2s" }}>✕</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Panel>
-
-              {/* Repaid Loans Panel */}
-              <Panel title="Repaid History">
-                {loans.filter(l => l.status === 'repaid').length === 0 ? <EmptyState icon="✅" text="No repaid loans yet" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
-                    {loans.filter(l => l.status === 'repaid').map(l => (
-                      <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,.01)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", opacity: 0.7 }}>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 600, textDecoration: "line-through" }}>{l.name}</div>
-                          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{fmtDate(l.date)}</div>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                          <span style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--teal)" }}>{currency(l.amount)}</span>
-                          <button onClick={() => delLoan(l.id)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 10 }}>✕</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Panel>
-            </div>
-          </div>
-        )}
-
         {/* ══ HISTORY ══ */}
         {tab === "history" && (
           <div key="history">
@@ -834,10 +594,7 @@ export default function App() {
                       <FinDateSelector value={expEnd} onChange={setExpEnd} />
                     </div>
                   )}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <GoldButton onClick={() => downloadStatement('csv')}>Download CSV</GoldButton>
-                    <TealButton onClick={() => downloadStatement('pdf')} className="ff-teal-btn">Download PDF</TealButton>
-                  </div>
+                  <GoldButton onClick={downloadStatement}>Download CSV</GoldButton>
                 </div>
               </div>
             </Panel>
