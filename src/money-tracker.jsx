@@ -769,33 +769,37 @@ export default function App() {
                 {loans.filter(l => l.status === 'pending').length === 0 ? <EmptyState icon="🤝" text="No active loans" /> : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {loans.filter(l => l.status === 'pending').map(l => (
-                      <div key={l.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                          <div>
-                            <div style={{ fontSize: 15, fontWeight: 700 }}>{l.name}</div>
-                            {l.note && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>{l.note}</div>}
-                          </div>
-                          <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>Total: {currency(l.amount)}</div>
-                            <div style={{ fontSize: 15, fontFamily: "var(--font-mono)", color: "var(--rose)", marginTop: 2 }}>Left: {currency(l.amount - (l.repaid_amount || 0))}</div>
-                            <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>{fmtDate(l.date)}</div>
-                          </div>
+                      <div key={l.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px", position: "relative" }}>
+                        
+                        <button onClick={() => delLoan(l.id)} className="ff-del" style={{ position: "absolute", top: 12, right: 12, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 12 }}>✕</button>
+
+                        <div style={{ marginBottom: 12, paddingRight: 20 }}>
+                           <div style={{ fontSize: 16, fontWeight: 700 }}>{l.name}</div>
+                           {l.note && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>{l.note}</div>}
+                           <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 4 }}>{fmtDate(l.date)}</div>
                         </div>
 
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontFamily: "var(--font-mono)", marginBottom: 6 }}>
+                          <span style={{ color: "var(--text-dim)" }}>Total: {currency(l.amount)}</span>
+                          <span style={{ color: "var(--rose)", fontWeight: 600 }}>Left: {currency(l.amount - (l.repaid_amount || 0))}</span>
+                        </div>
+                        
                         {/* Progress Bar */}
-                        <div style={{ height: 4, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden", margin: "8px 0" }}>
+                        <div style={{ height: 4, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden", marginBottom: 16 }}>
                            <div style={{ height: "100%", background: "var(--teal)", width: `${Math.min(100, ((l.repaid_amount || 0) / l.amount) * 100)}%`, borderRadius: 2, transition: "width .3s ease" }} />
                         </div>
 
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <FInput type="number" placeholder="Amt" id={`repay-${l.id}`} style={{ padding: "6px 10px", fontSize: 12, flex: 1 }} />
-                          <TealButton onClick={() => {
-                            const input = document.getElementById(`repay-${l.id}`);
-                            repayLoan(l.id, input.value);
-                            input.value = "";
-                          }} style={{ padding: "6px 12px", fontSize: 11 }}>Repay</TealButton>
-                          <TealButton onClick={() => markLoanRepaid(l.id)} style={{ padding: "6px 10px", fontSize: 11 }} title="Mark fully repaid">✓ Full</TealButton>
-                          <button onClick={() => delLoan(l.id)} style={{ background: "rgba(255,255,255,.05)", border: "none", borderRadius: "var(--radius-sm)", color: "var(--text-dim)", padding: "0 10px", cursor: "pointer", transition: "all .2s" }}>✕</button>
+                        {/* Action Row */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <FInput type="number" placeholder="Amount" id={`repay-${l.id}`} style={{ padding: "8px 12px", fontSize: 13, flex: 1 }} />
+                            <TealButton onClick={() => {
+                              const input = document.getElementById(`repay-${l.id}`);
+                              repayLoan(l.id, input.value);
+                              input.value = "";
+                            }} style={{ padding: "8px 16px", fontSize: 12 }}>Repay</TealButton>
+                          </div>
+                          <button onClick={() => markLoanRepaid(l.id)} style={{ background: "transparent", border: "1px solid var(--teal)", color: "var(--teal)", padding: "6px 0", borderRadius: "var(--radius-sm)", fontSize: 11, cursor: "pointer", width: "100%", transition: "all .2s" }}>✓ Mark Fully Repaid</button>
                         </div>
                       </div>
                     ))}
