@@ -177,6 +177,12 @@ export default function App() {
   const [eDate, setEDate] = useState(localToday);
   const [eTag, setETag] = useState("General");
 
+  // Export form
+  const [expType, setExpType] = useState("Month");
+  const [expMonth, setExpMonth] = useState(monthKey(localToday()));
+  const [expStart, setExpStart] = useState(localToday);
+  const [expEnd, setExpEnd] = useState(localToday);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
@@ -237,6 +243,43 @@ export default function App() {
   const delExpense = async (id) => {
     const { error } = await supabase.from('expenses').delete().eq('id', id);
     if (!error) setExpenses(prev => prev.filter(e => e.id !== id));
+  };
+
+  const downloadStatement = () => {
+    let s = [...salaryEntries], e = [...expenses];
+    if (expType === "Month" && expMonth) {
+      s = s.filter(x => monthKey(x.date) === expMonth);
+      e = e.filter(x => monthKey(x.date) === expMonth);
+    } else if (expType === "Date Range") {
+      s = s.filter(x => x.date >= expStart && x.date <= expEnd);
+      e = e.filter(x => x.date >= expStart && x.date <= expEnd);
+    }
+
+    const rows = [["Date", "Type", "Name/Tag", "Amount", "Allocations"]];
+    s.forEach(x => {
+      let alloc = x.savingsTag === "Extra" ? "" : `Tithe: ${x.tithe} | Wants: ${x.wantsAlloc} | Savings: ${x.savingsAlloc}`;
+      rows.push([x.date, "Income", x.savingsTag, x.amount, alloc]);
+    });
+    e.forEach(x => {
+      rows.push([x.date, "Expense", `${x.name} (${x.tag})`, `-${x.amount}`, ""]);
+    });
+    
+    rows.sort((a, b) => {
+      if(a[0] === "Date") return -1;
+      if(b[0] === "Date") return 1;
+      return b[0].localeCompare(a[0]);
+    });
+    
+    const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleSignOut = () => supabase.auth.signOut();
@@ -521,6 +564,41 @@ export default function App() {
         {tab === "history" && (
           <div key="history">
             <PageHeader title="History" sub="Monthly Breakdown" />
+
+            {/* Export Panel */}
+            <Panel title="Export Statement" style={{ marginBottom: 24, zIndex: 20 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {["Month", "Date Range"].map(t => (
+                    <button key={t} className={`ff-tag-btn ${expType === t ? "anim-pop" : ""}`} onClick={() => setExpType(t)} style={{
+                      padding: "7px 16px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      border: expType === t ? "1px solid rgba(240,192,64,.4)" : "1px solid var(--border-hi)",
+                      background: expType === t ? "var(--gold-glow)" : "transparent",
+                      color: expType === t ? "var(--gold)" : "var(--text-dim)",
+                      transition: "all .2s cubic-bezier(0.34, 1.56, 0.64, 1)",
+                    }}>{t}</button>
+                  ))}
+                </div>
+                
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  {expType === "Month" ? (
+                    <select value={expMonth} onChange={e => setExpMonth(e.target.value)} className="ff-input"
+                      style={{ background: "rgba(255,255,255,.04)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-sm)", padding: "11px 14px", fontFamily: "var(--font-ui)", fontSize: 14, color: "var(--text)", outline: "none", cursor: "pointer", transition: "all .25s", flex: 1, minWidth: 140 }}>
+                      {[...new Set(groups.map(g => g.key))].map(k => <option key={k} value={k}>{monthKeyLabel(k)}</option>)}
+                      {groups.length === 0 && <option value={expMonth}>{monthKeyLabel(expMonth)}</option>}
+                    </select>
+                  ) : (
+                    <div style={{ display: "flex", gap: 10, flex: 1, minWidth: 280, flexWrap: "wrap" }}>
+                      <FinDateSelector value={expStart} onChange={setExpStart} />
+                      <span style={{ color: "var(--text-dim)", alignSelf: "center", fontFamily: "var(--font-mono)", fontSize: 12 }}>TO</span>
+                      <FinDateSelector value={expEnd} onChange={setExpEnd} />
+                    </div>
+                  )}
+                  <GoldButton onClick={downloadStatement}>Download CSV</GoldButton>
+                </div>
+              </div>
+            </Panel>
+
             {groups.length === 0 && <EmptyState icon="📅" text="No history yet." />}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {groups.map((group, gi) => {
