@@ -1647,3 +1647,20 @@ button.kind-pill:active { transform: scale(.92); }
 
 .budget-bar__foot { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-3); }
 .budget-bar__foot b { color: var(--text); font-weight: 700; }
+
+/* Spending by category: ranked bars (biggest category in lime, the rest ink) */
+.cat-break { display: flex; flex-direction: column; gap: var(--s-5); }
+.cat-break__total { display: flex; flex-direction: column; gap: 4px; }
+.cat-break__lead { font-size: 13px; font-weight: 500; color: var(--text-3); }
+.cat-break__lead b { color: var(--text); font-weight: 700; }
+.cat-break__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.cat-break__row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cat-break__icon { width: 32px; height: 32px; border-radius: 50%; background: var(--surface-2); color: var(--text-2); display: grid; place-items: center; flex-shrink: 0; }
+.cat-break__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.cat-break__top { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.cat-break__name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-break__pct { color: var(--text-3); font-weight: 600; }
+.cat-break__amt { font-weight: 700; white-space: nowrap; }
+.cat-break__track { height: 6px; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }
+.cat-break__fill { height: 100%; border-radius: inherit; background: var(--ink); transition: width .6s var(--ease); }
+.cat-break__fill[data-top="true"] { background: var(--lime-chart); }

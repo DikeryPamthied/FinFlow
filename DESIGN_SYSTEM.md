@@ -55,7 +55,7 @@ Rules:
 | Use | Tokens |
 |---|---|
 | Cash flow (2 series) | Income `--c-income` (ink), Spent `--c-spent` (lime-chart) |
-| Expense categories | `--cat-1 … --cat-8`, in the **fixed order** General, Food, Transport, Bills, Health, Entertainment, Shopping, Other |
+| Expense categories | Dashboard breakdown: ink bars with the top category in `--lime-chart`. `--cat-1 … --cat-8` (fixed order General, Food, Transport, Bills, Health, Entertainment, Shopping, Other) remain for category icons and any future multi-series chart |
 | Savings split | Investments white, Emergency lime (on ink) |
 | Allocation bar | Tithe `--text-3`, Wants `--lime-chart`, Savings `--ink` |
 
@@ -129,7 +129,7 @@ Formatting is always `en-IN` INR through `currency()`, which uses lakh grouping 
 - **Library:** Recharts (already a dependency).
 - **Form follows the data's job:**
   - Cash flow is a **grouped bar chart** (month-to-month comparison) with a 6M / 12M / All range control. Months with no records are drawn as 0, not skipped.
-  - Category share is a **donut** with a centre total and a ranked legend showing % and the amount.
+  - Category share is a **ranked bar list**, not a donut: the total on top, then one row per category (circle icon, name, %, amount) with a thin share bar. Only the biggest category is lime; the rest are ink.
   - Savings is a **single-series bar chart** with the current month in lime and a stated 12-month average.
   - The spending meter and allocation bars are **not charts**; they are labelled bars.
 - **Marks:** 4px top radius on bars, `maxBarSize` 20–28, a 2px surface gap between donut slices, and a horizontal-only grid in `--divider`. Axes have no tick or axis lines.
