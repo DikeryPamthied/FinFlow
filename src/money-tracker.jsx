@@ -50,6 +50,14 @@ const CATEGORIES = [
   { id: "Other", icon: "box", color: "var(--cat-8)" },
 ];
 const catMeta = (tag) => CATEGORIES.find(c => c.id === tag) || CATEGORIES[CATEGORIES.length - 1];
+// Suggested need/want for each category when adding an expense (the person can change it)
+const NEED_CATEGORIES = ["Food", "Transport", "Bills", "Health"];
+const kindFor = (tag) => (NEED_CATEGORIES.includes(tag) ? "need" : "want");
+
+// Budget plan defaults: 10% tithe; needs and wants as monthly spending limits (% of salary)
+const DEFAULT_PLAN = { titheOn: true, tithePct: 10, needsPct: 50, wantsPct: 30, saved: false };
+const pctOf = (v) => Math.max(0, Math.min(100, parseFloat(v) || 0));
+const DESTINATIONS = { Emergency: { label: "Emergency fund", icon: "shield" }, Investment: { label: "Investments", icon: "trend" } };
 
 const TAB_IDS = ["dashboard", "expenses", "savings", "goals", "lending", "history"];
 const tabFromHash = () => { const h = window.location.hash.slice(1); return TAB_IDS.includes(h) ? h : "dashboard"; };
@@ -66,25 +74,45 @@ const GOAL_COLORS =["var(--c-ink)", "var(--c-lime)", "var(--c-blue)", "var(--c-o
 // ─── Supabase helpers ─────────────────────────────────────────────────────────
 async function loadData() {
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { salaryEntries: [], expenses: [] };
-  const [salRes, expRes] = await Promise.all([
+  if (!user) return { salaryEntries: [], expenses: [], transfers: [], plan: DEFAULT_PLAN, schemaReady: true };
+  const [salRes, expRes, planRes, trRes] = await Promise.all([
     supabase.from('salary_entries').select('*').eq('user_id', user.id).order('date', { ascending: false }),
-    supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false })
+    supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false }),
+    supabase.from('budget_settings').select('*').eq('user_id', user.id).maybeSingle(),
+    supabase.from('savings_transfers').select('*').eq('user_id', user.id).order('date', { ascending: false }),
   ]);
+  const p = planRes.data;
   return {
-    salaryEntries: salRes.data?.map(s => ({ ...s, amount: parseFloat(s.amount), tithe: parseFloat(s.tithe), wantsAlloc: parseFloat(s.wants_alloc), savingsAlloc: parseFloat(s.savings_alloc), savingsTag: s.savings_tag })) || [],
-    expenses: expRes.data?.map(e => ({ ...e, amount: parseFloat(e.amount) })) || []
+    salaryEntries: salRes.data?.map(s => ({ ...s, amount: parseFloat(s.amount), tithe: parseFloat(s.tithe) || 0, wantsAlloc: parseFloat(s.wants_alloc) || 0, savingsAlloc: parseFloat(s.savings_alloc) || 0, savingsTag: s.savings_tag })) || [],
+    expenses: expRes.data?.map(e => ({ ...e, amount: parseFloat(e.amount), kind: e.kind === "need" ? "need" : "want" })) || [],
+    transfers: trRes.data?.map(t => ({ ...t, amount: parseFloat(t.amount) })) || [],
+    plan: p ? { titheOn: p.tithe_on, tithePct: parseFloat(p.tithe_pct), needsPct: parseFloat(p.needs_pct), wantsPct: parseFloat(p.wants_pct), saved: true } : DEFAULT_PLAN,
+    // The budget tables come from supabase/budget_setup.sql; until it has been run, saving plans and moves is unavailable
+    schemaReady: !planRes.error && !trRes.error,
   };
 }
 
-function computeTotals(salaryEntries, expenses) {
-  const tithe = salaryEntries.reduce((s, e) => s + (e.tithe || 0), 0);
-  const savings = salaryEntries.reduce((s, e) => s + (e.savingsAlloc || 0), 0);
-  const savInv = salaryEntries.filter(e => e.savingsTag === "Investment").reduce((s, e) => s + (e.savingsAlloc || 0), 0);
-  const savEm = salaryEntries.filter(e => e.savingsTag === "Emergency").reduce((s, e) => s + (e.savingsAlloc || 0), 0);
-  const wants = salaryEntries.reduce((s, e) => s + (e.wantsAlloc || 0), 0);
-  const spent = expenses.reduce((s, e) => s + (e.amount || 0), 0);
-  return { tithe, savings, savInv, savEm, wants, spent, wantsBalance: wants - spent };
+// Savings = income − tithe − spending − everything moved to the emergency fund or investments
+function computeTotals(salaryEntries, expenses, transfers) {
+  const income = sum(salaryEntries, e => e.amount);
+  const tithe = sum(salaryEntries, e => e.tithe || 0);
+  const spent = sum(expenses, e => e.amount || 0);
+  // Older salaries' "Investment"/"Emergency" tag isn't treated as a move: all of it counts as savings
+  const moved = (dest) => sum(transfers.filter(t => t.destination === dest), t => t.amount);
+  const emergency = moved("Emergency");
+  const invested = moved("Investment");
+  return { income, tithe, spent, emergency, invested, savings: income - tithe - spent - emergency - invested };
+}
+
+// This month's needs / wants limits come from the plan and the month's salary (extra income excluded)
+function monthBudget(group, plan) {
+  const salary = sum(group.entries.filter(e => e.savingsTag !== "Extra"), e => e.amount);
+  const make = (kind, pct) => {
+    const limit = salary * pct / 100;
+    const spent = sum(group.expenses.filter(e => e.kind === kind), e => e.amount);
+    return { limit, spent, left: limit - spent, pct: limit > 0 ? Math.min(100, (spent / limit) * 100) : spent > 0 ? 100 : 0, over: spent > limit };
+  };
+  return { salary, needs: make("need", plan.needsPct), wants: make("want", plan.wantsPct) };
 }
 
 function groupByMonth(salaryEntries, expenses) {
@@ -138,6 +166,7 @@ const ICONS = {
   bag: <><path d="M5 8h14l-1 12.5H6z" /><path d="M9 8V6.5a3 3 0 0 1 6 0V8" /></>,
   box: <><path d="M3.5 7.5L12 3.5l8.5 4v9L12 20.5l-8.5-4z" /><path d="M3.5 7.5L12 11.5l8.5-4M12 11.5v9" /></>,
   income: <path d="M12 4v16M6 14l6 6 6-6" />,
+  sliders: <><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></>,
 };
 
 function Icon({ name, size = 18, stroke = 1.8, style }) {
@@ -191,10 +220,10 @@ function Auth() {
           </div>
           <div>
             <h1 style={{ fontSize: 34, lineHeight: "40px", fontWeight: 600, letterSpacing: "-0.03em", marginBottom: 12 }}>Know where every rupee goes.</h1>
-            <p style={{ color: "var(--text-on-ink-2)", fontSize: 15, lineHeight: "22px" }}>Income is split automatically into tithe, wants and savings, so you always know what's safe to spend.</p>
+            <p style={{ color: "var(--text-on-ink-2)", fontSize: 15, lineHeight: "22px" }}>Income lands in your savings first, with your own tithe and spending limits, so you always know what's safe to spend.</p>
           </div>
           <div className="auth__features" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {[["Automatic 10 / 45 / 45 split", "trend"], ["Synced securely to the cloud", "shield"], ["CSV & PDF statements", "download"]].map(([t, ic]) => (
+            {[["Your own tithe, needs & wants plan", "trend"], ["Synced securely to the cloud", "shield"], ["CSV & PDF statements", "download"]].map(([t, ic]) => (
               <div key={t} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 14, fontWeight: 600 }}>
                 <span className="quick__circle" style={{ width: 36, height: 36 }}><Icon name={ic} size={16} /></span>
                 {t}
@@ -317,6 +346,9 @@ export default function App() {
   const [splashPhase, setSplashPhase] = useState("show"); // show → reveal → done
   const [salaryEntries, setSalaryEntries] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [transfers, setTransfers] = useState([]);
+  const [plan, setPlan] = useState(DEFAULT_PLAN);
+  const [schemaReady, setSchemaReady] = useState(true);
   const [goals, setGoals] = useState(() => readLocalArray('finflow_goals'));
   const [loans, setLoans] = useState(() => readLocalArray('finflow_loans'));
   const [tab, setTab] = useState(tabFromHash);
@@ -325,7 +357,6 @@ export default function App() {
   // Salary form
   const [sAmt, setSAmt] = useState("");
   const [sDate, setSDate] = useState(localToday);
-  const [sTag, setSTag] = useState("Investment");
   const [incType, setIncType] = useState("Salary");
 
   // Expense form
@@ -333,6 +364,17 @@ export default function App() {
   const [eAmt, setEAmt] = useState("");
   const [eDate, setEDate] = useState(localToday);
   const [eTag, setETag] = useState("General");
+  const [eKind, setEKind] = useState(kindFor("General"));
+
+  // Move-from-savings form (emergency fund / investments)
+  const [tDest, setTDest] = useState("Emergency");
+  const [tAmt, setTAmt] = useState("");
+  const [tDate, setTDate] = useState(localToday);
+  const [tNote, setTNote] = useState("");
+
+  // Budget plan form (a draft until saved)
+  const [draft, setDraft] = useState(DEFAULT_PLAN);
+  const [planSaving, setPlanSaving] = useState(false);
 
   // Expense list controls
   const [eQuery, setEQuery] = useState("");
@@ -393,10 +435,22 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  useLayoutEffect(() => { window.scrollTo(0, scrollPos.current[tab] || 0); }, [tab]);
+  useLayoutEffect(() => {
+    window.scrollTo(0, scrollPos.current[tab] || 0);
+    document.documentElement.dataset.scrollDir = "up"; // a new page always shows the add button
+  }, [tab]);
 
+  // Scrolling down tucks the floating add button away; scrolling back up brings it back
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 56);
+    const root = document.documentElement;
+    let lastY = window.scrollY;
+    const onScroll = () => {
+      const y = window.scrollY;
+      setScrolled(y > 56);
+      if (Math.abs(y - lastY) < 8) return; // ignore jitter
+      root.dataset.scrollDir = y > lastY && y > 80 ? "down" : "up";
+      lastY = y;
+    };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
@@ -441,19 +495,21 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
-    loadData().then(data => { setSalaryEntries(data.salaryEntries); setExpenses(data.expenses); setLoaded(true); });
+    loadData().then(data => {
+      setSalaryEntries(data.salaryEntries); setExpenses(data.expenses); setTransfers(data.transfers);
+      setPlan(data.plan); setSchemaReady(data.schemaReady); setLoaded(true);
+    });
   }, [session]);
 
-  const T = useMemo(() => computeTotals(salaryEntries, expenses), [salaryEntries, expenses]);
-  const wPct = T.wants > 0 ? Math.min(100, (T.spent / T.wants) * 100) : 0;
+  const T = useMemo(() => computeTotals(salaryEntries, expenses, transfers), [salaryEntries, expenses, transfers]);
   const groups = useMemo(() => groupByMonth(salaryEntries, expenses), [salaryEntries, expenses]);
 
   const prevAmt = parseFloat(sAmt) || 0;
   const hasPrev = prevAmt > 0;
   const isExtra = incType === "Extra";
-  const pTithe = isExtra ? 0 : prevAmt * 0.1;
-  const pWants = isExtra ? prevAmt : prevAmt * 0.9 * 0.5;
-  const pSavings = isExtra ? 0 : prevAmt * 0.9 * 0.5;
+  const tithePct = isExtra || !plan.titheOn ? 0 : plan.tithePct;
+  const pTithe = prevAmt * tithePct / 100;
+  const pSavings = prevAmt - pTithe;
 
   // ── Derived views (presentation only — totals above remain the source of truth) ──
   const curKey = monthKey(localToday());
@@ -463,7 +519,9 @@ export default function App() {
   const lastMonth = monthOf(prevKey);
   const mIncome = sum(thisMonth.entries, e => e.amount);
   const mSpent = sum(thisMonth.expenses, e => e.amount);
-  const mSaved = sum(thisMonth.entries, e => e.savingsAlloc);
+  const mTithe = sum(thisMonth.entries, e => e.tithe);
+  const mKept = mIncome - mTithe - mSpent; // what this month added to savings
+  const budget = monthBudget(thisMonth, plan);
   const lmSpent = sum(lastMonth.expenses, e => e.amount);
   const spentDelta = lmSpent > 0 ? ((mSpent - lmSpent) / lmSpent) * 100 : null;
 
@@ -501,31 +559,32 @@ export default function App() {
     return groupByDay(items.slice(0, 8));
   }, [salaryEntries, expenses]);
 
+  // Money set aside each month: moves to the emergency fund / investments
   const savingsSeries = useMemo(() => {
     const nowKey = monthKey(localToday());
-    const byKey = Object.fromEntries(groups.map(g => [g.key, g]));
+    const byKey = {};
+    transfers.forEach(t => { const k = monthKey(t.date); byKey[k] = (byKey[k] || 0) + t.amount; });
     return Array.from({ length: 12 }, (_, i) => {
       const k = addMonths(nowKey, i - 11);
-      const g = byKey[k];
-      return { key: k, label: monthShort(k), full: monthKeyLabel(k), saved: g ? sum(g.entries, e => e.savingsAlloc) : 0, current: k === nowKey };
+      return { key: k, label: monthShort(k), full: monthKeyLabel(k), saved: byKey[k] || 0, current: k === nowKey };
     });
-  }, [groups]);
+  }, [transfers]);
   const savings12 = sum(savingsSeries, d => d.saved);
 
+  // Salary: tithe (if on) is taken off the top and the rest goes to savings. Extra income: all to savings.
   const addSalary = async () => {
     const amount = parseFloat(sAmt);
     if (!amount || amount <= 0 || !sDate || !session) return;
     const isExtra = incType === "Extra";
-    const tithe = isExtra ? 0 : +(amount * 0.1).toFixed(2);
-    const wantsAlloc = isExtra ? amount : +(amount * 0.9 * 0.5).toFixed(2);
-    const savingsAlloc = isExtra ? 0 : +(amount * 0.9 * 0.5).toFixed(2);
-    const finalTag = isExtra ? "Extra" : sTag;
+    const tithe = isExtra || !plan.titheOn ? 0 : +(amount * plan.tithePct / 100).toFixed(2);
+    const savingsAlloc = +(amount - tithe).toFixed(2);
+    const tag = isExtra ? "Extra" : "Salary";
 
     const { data, error } = await supabase.from('salary_entries').insert([{
-      user_id: session.user.id, date: sDate, amount, savings_tag: finalTag, tithe, wants_alloc: wantsAlloc, savings_alloc: savingsAlloc
+      user_id: session.user.id, date: sDate, amount, savings_tag: tag, tithe, wants_alloc: 0, savings_alloc: savingsAlloc
     }]).select();
     if (!error && data) {
-      setSalaryEntries(prev => [{ id: data[0].id, date: sDate, amount, savingsTag: finalTag, tithe, wantsAlloc, savingsAlloc }, ...prev]);
+      setSalaryEntries(prev => [{ id: data[0].id, date: sDate, amount, savingsTag: tag, tithe, wantsAlloc: 0, savingsAlloc }, ...prev]);
       setSAmt(""); setSDate(localToday());
       return true;
     }
@@ -541,11 +600,11 @@ export default function App() {
   const addExpense = async () => {
     const amount = parseFloat(eAmt);
     if (!amount || amount <= 0 || !eName.trim() || !session) return;
-    const { data, error } = await supabase.from('expenses').insert([{
-      user_id: session.user.id, date: eDate, name: eName.trim(), amount, tag: eTag
-    }]).select();
+    const row = { user_id: session.user.id, date: eDate, name: eName.trim(), amount, tag: eTag };
+    if (schemaReady) row.kind = eKind; // the kind column arrives with supabase/budget_setup.sql
+    const { data, error } = await supabase.from('expenses').insert([row]).select();
     if (!error && data) {
-      setExpenses(prev => [{ id: data[0].id, date: eDate, name: eName.trim(), amount, tag: eTag }, ...prev]);
+      setExpenses(prev => [{ id: data[0].id, date: eDate, name: eName.trim(), amount, tag: eTag, kind: schemaReady ? eKind : "want" }, ...prev]);
       setEName(""); setEAmt(""); setEDate(localToday());
       return true;
     }
@@ -556,6 +615,46 @@ export default function App() {
     const { error } = await supabase.from('expenses').delete().eq('id', id);
     if (!error) setExpenses(prev => prev.filter(e => e.id !== id));
     return !error;
+  };
+
+  const setExpenseKind = async (id, kind) => {
+    const { error } = await supabase.from('expenses').update({ kind }).eq('id', id);
+    if (!error) setExpenses(prev => prev.map(e => (e.id === id ? { ...e, kind } : e)));
+    return !error;
+  };
+
+  const addTransfer = async () => {
+    const amount = parseFloat(tAmt);
+    if (!amount || amount <= 0 || !tDate || !session || !schemaReady) return false;
+    const note = tNote.trim() || null;
+    const { data, error } = await supabase.from('savings_transfers').insert([{
+      user_id: session.user.id, date: tDate, amount, destination: tDest, note
+    }]).select();
+    if (!error && data) {
+      setTransfers(prev => [{ id: data[0].id, date: tDate, amount, destination: tDest, note }, ...prev]);
+      setTAmt(""); setTNote(""); setTDate(localToday());
+      return true;
+    }
+    return false;
+  };
+
+  const delTransfer = async (id) => {
+    const { error } = await supabase.from('savings_transfers').delete().eq('id', id);
+    if (!error) setTransfers(prev => prev.filter(t => t.id !== id));
+    return !error;
+  };
+
+  const savePlan = async () => {
+    if (!session || !schemaReady) return false;
+    const next = { titheOn: draft.titheOn, tithePct: pctOf(draft.tithePct), needsPct: pctOf(draft.needsPct), wantsPct: pctOf(draft.wantsPct), saved: true };
+    setPlanSaving(true);
+    const { error } = await supabase.from('budget_settings').upsert({
+      user_id: session.user.id, tithe_on: next.titheOn, tithe_pct: next.tithePct, needs_pct: next.needsPct, wants_pct: next.wantsPct, updated_at: new Date().toISOString()
+    });
+    setPlanSaving(false);
+    if (error) return false;
+    setPlan(next);
+    return true;
   };
 
   const addGoal = () => {
@@ -608,22 +707,27 @@ export default function App() {
   };
 
   const downloadStatement = (format = 'csv') => {
-    let s = [...salaryEntries], e = [...expenses];
+    let s = [...salaryEntries], e = [...expenses], t = [...transfers];
     if (expType === "Month" && expMonth) {
       s = s.filter(x => monthKey(x.date) === expMonth);
       e = e.filter(x => monthKey(x.date) === expMonth);
+      t = t.filter(x => monthKey(x.date) === expMonth);
     } else if (expType === "Date Range") {
       s = s.filter(x => x.date >= expStart && x.date <= expEnd);
       e = e.filter(x => x.date >= expStart && x.date <= expEnd);
+      t = t.filter(x => x.date >= expStart && x.date <= expEnd);
     }
 
     const rows = [["Date", "Type", "Name/Tag", "Amount", "Allocations"]];
     s.forEach(x => {
-      let alloc = x.savingsTag === "Extra" ? "" : `Tithe: ${x.tithe} | Wants: ${x.wantsAlloc} | Savings: ${x.savingsAlloc}`;
-      rows.push([x.date, "Income", x.savingsTag, x.amount, alloc]);
+      const alloc = `${x.tithe > 0 ? `Tithe: ${x.tithe} | ` : ""}To savings: ${x.amount - x.tithe}`;
+      rows.push([x.date, "Income", x.savingsTag === "Extra" ? "Extra" : "Salary", x.amount, alloc]);
     });
     e.forEach(x => {
-      rows.push([x.date, "Expense", `${x.name} (${x.tag})`, `-${x.amount}`, ""]);
+      rows.push([x.date, "Expense", `${x.name} (${x.tag}, ${x.kind})`, `-${x.amount}`, ""]);
+    });
+    t.forEach(x => {
+      rows.push([x.date, "Moved from savings", `${DESTINATIONS[x.destination]?.label || x.destination}${x.note ? ` (${x.note})` : ""}`, x.amount, ""]);
     });
 
     rows.sort((a, b) => {
@@ -666,6 +770,7 @@ export default function App() {
 
   const handleSignOut = () => supabase.auth.signOut();
   const sortedSalaries = [...salaryEntries].sort((a, b) => b.date.localeCompare(a.date));
+  const moves = [...transfers].sort((a, b) => b.date.localeCompare(a.date));
 
   // Expense list: search, category filter, sort
   const expenseView = useMemo(() => {
@@ -698,7 +803,7 @@ export default function App() {
 
   const activeLoans = loans.filter(l => l.status === 'pending');
   const repaidLoans = loans.filter(l => l.status === 'repaid');
-  const overBudget = T.wantsBalance < 0;
+  const overdrawn = T.savings < 0;
 
   const go = (id) => {
     if (id === tab) { window.scrollTo({ top: 0, behavior: "smooth" }); return; } // re-tap: back to top
@@ -719,10 +824,21 @@ export default function App() {
   const submitLoan = () => { if (addLoan()) { haptic(12); notify("Loan recorded"); closeSheet(); } };
   const removeSalary = async (id) => { haptic(14); notify(await delSalary(id) ? "Income entry deleted" : "Couldn't delete — try again", "neg"); };
   const removeExpense = async (id) => { haptic(14); notify(await delExpense(id) ? "Expense deleted" : "Couldn't delete — try again", "neg"); };
+  const flipKind = async (e) => {
+    const kind = e.kind === "need" ? "want" : "need";
+    haptic(6);
+    notify(await setExpenseKind(e.id, kind) ? `${e.name} now counts as a ${kind}` : "Couldn't change — try again", "pos");
+  };
+  const submitTransfer = async () => { if (await addTransfer()) { haptic(12); notify(`Moved to ${DESTINATIONS[tDest].label.toLowerCase()}`); closeSheet(); } };
+  const removeTransfer = async (id) => { haptic(14); notify(await delTransfer(id) ? "Move undone, back in savings" : "Couldn't delete — try again", "neg"); };
+  const submitPlan = async () => { if (await savePlan()) { haptic(12); notify("Budget plan saved"); closeSheet(); } else notify("Couldn't save — try again", "neg"); };
+  const openPlan = () => { setDraft({ titheOn: plan.titheOn, tithePct: String(plan.tithePct), needsPct: String(plan.needsPct), wantsPct: String(plan.wantsPct) }); openSheet("plan"); };
+  const openMove = (dest) => { setTDest(dest); openSheet("move"); };
 
   const userName = session.user?.email?.split("@")[0] || "there";
   const pageTitle = tab === "dashboard" ? "Dashboard" : TABS.find(t => t.id === tab)?.label;
-  const incomeHint = isExtra ? "Extra income goes 100% to your wants balance." : "Salary is split 10% tithe · 45% wants · 45% savings.";
+  const incomeHint = isExtra ? "Extra income goes straight to your savings."
+    : plan.titheOn ? `${plan.tithePct}% tithe comes off the top, the rest goes to your savings.` : "Your salary goes straight to your savings.";
 
   const renderIncomeForm = (inSheet) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -746,28 +862,17 @@ export default function App() {
         </div>
       </div>
 
-      {!isExtra && (
-        <div className="field">
-          <span className="field__label">Savings go to</span>
-          <Segmented options={["Investment", "Emergency"]} value={sTag} onChange={setSTag} label="Savings destination" />
-        </div>
-      )}
-
       <div className="tile">
         <div className="stack" aria-hidden="true">
-          {isExtra
-            ? <span style={{ flexGrow: 1, background: "var(--lime-chart)" }} />
-            : <>
-              <span style={{ flexGrow: 10, background: "var(--text-3)" }} />
-              <span style={{ flexGrow: 45, background: "var(--lime-chart)" }} />
-              <span style={{ flexGrow: 45, background: "var(--ink)" }} />
-            </>}
+          {tithePct > 0 && <span style={{ flexGrow: tithePct, background: "var(--text-3)" }} />}
+          <span style={{ flexGrow: 100 - tithePct, background: "var(--ink)" }} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 14 }}>
-          {(isExtra
-            ? [["Wants · 100%", pWants, "var(--lime-chart)"], ["New wants balance", T.wantsBalance + pWants, null]]
-            : [["Tithe · 10%", pTithe, "var(--text-3)"], ["Wants · 45%", pWants, "var(--lime-chart)"], ["Savings · 45%", pSavings, "var(--ink)"], ["New wants balance", T.wantsBalance + pWants, null]]
-          ).map(([lbl, val, col]) => (
+          {[
+            ...(tithePct > 0 ? [[`Tithe · ${tithePct}%`, pTithe, "var(--text-3)"]] : []),
+            ["To savings", pSavings, "var(--ink)"],
+            ["New savings balance", T.savings + pSavings, null],
+          ].map(([lbl, val, col]) => (
             <div key={lbl}>
               <div className="legend__item eyebrow">{col && <span className="dot dot--sq" style={{ background: col }} />}{lbl}</div>
               <Money value={hasPrev || !col ? val : 0} className="money--md" style={{ marginTop: 2, color: hasPrev ? undefined : "var(--text-3)" }} />
@@ -805,18 +910,26 @@ export default function App() {
         <span className="field__label">Category</span>
         <div className="chip-grid" role="group" aria-label="Category">
           {CATEGORIES.map(c => (
-            <button key={c.id} type="button" className="chip" aria-pressed={eTag === c.id} onClick={() => { haptic(5); setETag(c.id); }}>
+            <button key={c.id} type="button" className="chip" aria-pressed={eTag === c.id} onClick={() => { haptic(5); setETag(c.id); setEKind(kindFor(c.id)); }}>
               <Icon name={c.icon} size={18} />
               <span>{c.id}</span>
             </button>
           ))}
         </div>
       </div>
+      <div className="field">
+        <span className="field__label">Counts as</span>
+        <Segmented options={[["need", "Need"], ["want", "Want"]]} value={eKind} onChange={setEKind} label="Need or want" />
+        {budget.salary > 0 && (() => {
+          const b = eKind === "need" ? budget.needs : budget.wants;
+          return <span className="card__sub">{b.over ? `${eKind === "need" ? "Needs" : "Wants"} are over this month's limit by ` : `${eKind === "need" ? "Needs" : "Wants"} left this month: `}<b className="num" style={{ color: b.over ? "var(--neg)" : "var(--text)" }}>{currency(Math.abs(b.left))}</b> of {currency(b.limit)}</span>;
+        })()}
+      </div>
       <button className="btn btn--primary btn--block" onClick={submitExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0}>
         <Icon name="plus" size={16} /> Add expense
       </button>
-      {overBudget && (
-        <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Over budget by {currency(Math.abs(T.wantsBalance))}</span></div>
+      {overdrawn && (
+        <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Savings are overdrawn by {currency(Math.abs(T.savings))}</span></div>
       )}
     </div>
   );
@@ -875,11 +988,113 @@ export default function App() {
     </div>
   );
 
+  const moveAmt = parseFloat(tAmt) || 0;
+  const moveForm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="field">
+        <span className="field__label">Move to</span>
+        <Segmented options={[["Emergency", "Emergency fund"], ["Investment", "Investments"]]} value={tDest} onChange={setTDest} label="Move to" />
+      </div>
+      <div className="form-row">
+        <label className="field">
+          <span className="field__label">Amount</span>
+          <span className="input-wrap">
+            <span className="input-prefix">₹</span>
+            <input className="input num" type="number" inputMode="decimal" enterKeyHint="next" placeholder="0.00" value={tAmt} onChange={e => setTAmt(e.target.value)} />
+          </span>
+        </label>
+        <div className="field">
+          <span className="field__label">Date</span>
+          <FinDateSelector value={tDate} onChange={setTDate} label="Move date" />
+        </div>
+      </div>
+      <label className="field">
+        <span className="field__label">Note <span style={{ color: "var(--text-3)", fontWeight: 500 }}>(optional)</span></span>
+        <input className="input" placeholder={tDest === "Investment" ? "e.g. Index fund SIP" : "e.g. Monthly top-up"} enterKeyHint="done" autoComplete="off" value={tNote} onChange={e => setTNote(e.target.value)} onKeyDown={e => e.key === "Enter" && submitTransfer()} />
+      </label>
+      <div className="tile" style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
+        <span style={{ color: "var(--text-2)" }}>Savings after this</span>
+        <b className="num" style={{ color: T.savings - moveAmt < 0 ? "var(--neg)" : "var(--text)" }}>{currency(T.savings - moveAmt)}</b>
+      </div>
+      {moveAmt > T.savings && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>That's more than you have in savings.</span></div>}
+      {!schemaReady && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Moving money needs the one-time database setup first.</span></div>}
+      <button className="btn btn--primary btn--block" onClick={submitTransfer} disabled={!schemaReady || moveAmt <= 0}>
+        <Icon name={DESTINATIONS[tDest].icon} size={16} /> {tDest === "Investment" ? "Invest" : "Add to emergency fund"}
+      </button>
+    </div>
+  );
+
+  // Plan preview uses this month's salary, else the latest one, else a round example
+  const draftTithe = draft.titheOn ? pctOf(draft.tithePct) : 0;
+  const draftNeeds = pctOf(draft.needsPct);
+  const draftWants = pctOf(draft.wantsPct);
+  const draftLeft = 100 - draftTithe - draftNeeds - draftWants;
+  const exampleSalary = budget.salary || sortedSalaries.find(e => e.savingsTag !== "Extra")?.amount || 30000;
+  const pctInput = (key, label) => (
+    <span className="input-wrap">
+      <input className="input num input--pct" type="number" inputMode="decimal" min="0" max="100" enterKeyHint="next" value={draft[key]} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))} aria-label={`${label} percentage`} />
+      <span className="input-suffix">%</span>
+    </span>
+  );
+  const planForm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <p className="card__sub" style={{ margin: 0 }}>Your salary goes into savings first. Needs and wants are monthly spending limits; whatever you don't spend stays saved.</p>
+      <div className="field">
+        <span className="field__label">Tithe</span>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Segmented options={[["on", "On"], ["off", "Off"]]} value={draft.titheOn ? "on" : "off"} onChange={v => setDraft(d => ({ ...d, titheOn: v === "on" }))} label="Tithe" />
+          {draft.titheOn && <div style={{ width: 110 }}>{pctInput("tithePct", "Tithe")}</div>}
+        </div>
+      </div>
+      <div className="form-row">
+        <label className="field">
+          <span className="field__label">Needs</span>
+          {pctInput("needsPct", "Needs")}
+          <span className="card__sub">Rent, food, bills, travel</span>
+        </label>
+        <label className="field">
+          <span className="field__label">Wants</span>
+          {pctInput("wantsPct", "Wants")}
+          <span className="card__sub">Fun, shopping, eating out</span>
+        </label>
+      </div>
+      <div className="tile">
+        <div className="stack" aria-hidden="true">
+          {draftTithe > 0 && <span style={{ flexGrow: draftTithe, background: "var(--text-3)" }} />}
+          {draftNeeds > 0 && <span style={{ flexGrow: draftNeeds, background: "var(--ink)" }} />}
+          {draftWants > 0 && <span style={{ flexGrow: draftWants, background: "var(--lime-chart)" }} />}
+          {draftLeft > 0 && <span style={{ flexGrow: draftLeft, background: "var(--surface-3)" }} />}
+        </div>
+        <div className="card__sub" style={{ marginTop: 12 }}>On a <b className="num" style={{ color: "var(--text)" }}>{currency(exampleSalary)}</b> salary:</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 8 }}>
+          {[
+            ...(draftTithe > 0 ? [[`Tithe · ${draftTithe}%`, draftTithe, "var(--text-3)"]] : []),
+            [`Needs limit · ${draftNeeds}%`, draftNeeds, "var(--ink)"],
+            [`Wants limit · ${draftWants}%`, draftWants, "var(--lime-chart)"],
+            [`Left to save · ${Math.max(0, draftLeft)}%`, Math.max(0, draftLeft), "var(--surface-3)"],
+          ].map(([lbl, pct, col]) => (
+            <div key={lbl}>
+              <div className="legend__item eyebrow"><span className="dot dot--sq" style={{ background: col }} />{lbl}</div>
+              <Money value={exampleSalary * pct / 100} className="money--md" style={{ marginTop: 2 }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      {draftLeft < 0 && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>That adds up to more than 100%. Lower one of them.</span></div>}
+      {!schemaReady && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Saving a plan needs the one-time database setup first.</span></div>}
+      <button className="btn btn--primary btn--block" onClick={submitPlan} disabled={!schemaReady || draftLeft < 0 || planSaving}>
+        {planSaving ? <span className="spinner" /> : <><Icon name="check" size={16} /> Save plan</>}
+      </button>
+    </div>
+  );
+
   const SHEETS = {
     income: { title: "Record income", body: renderIncomeForm(true) },
     expense: { title: "Add expense", body: expenseForm },
     goal: { title: "New goal", body: goalForm },
     loan: { title: "New loan", body: loanForm },
+    move: { title: tDest === "Investment" ? "Invest" : "Add to emergency fund", body: moveForm },
+    plan: { title: "Budget plan", body: planForm },
   };
 
   const salaryRowProps = (e, onDelete) => {
@@ -887,8 +1102,8 @@ export default function App() {
     return {
       icon: "income",
       iconClass: extra ? "row__icon--lime" : "row__icon--ink",
-      title: extra ? "Extra income" : `Salary · ${e.savingsTag}`,
-      meta: extra ? `${fmtDate(e.date)} · 100% to wants` : `Tithe ${currency(e.tithe)} · Wants ${currency(e.wantsAlloc)} · Savings ${currency(e.savingsAlloc)}`,
+      title: extra ? "Extra income" : "Salary",
+      meta: e.tithe > 0 ? `Tithe ${currency(e.tithe)} · ${currency(e.amount - e.tithe)} to savings` : `${fmtDate(e.date)} · all to savings`,
       amount: e.amount, positive: true, onDelete, deleteLabel: "Delete income entry",
     };
   };
@@ -897,6 +1112,7 @@ export default function App() {
     return {
       icon: c.icon, iconColor: c.color, title: e.name,
       meta: showDate ? `${e.tag} · ${fmtDate(e.date)}` : e.tag,
+      kind: e.kind, onKind: schemaReady ? () => flipKind(e) : undefined,
       amount: e.amount, positive: false, onDelete, deleteLabel: `Delete expense ${e.name}`,
     };
   };
@@ -925,6 +1141,9 @@ export default function App() {
               <span className="avatar">{userName.charAt(0)}</span>
               <span className="user-chip__name">{userName}</span>
             </div>
+            <button className="icon-btn icon-btn--solid" onClick={openPlan} aria-label="Budget plan" title="Budget plan" style={{ width: 40, height: 40 }}>
+              <Icon name="sliders" size={18} />
+            </button>
             <button className="icon-btn icon-btn--solid" onClick={handleSignOut} aria-label="Sign out" title="Sign out" style={{ width: 40, height: 40 }}>
               <Icon name="logout" size={18} />
             </button>
@@ -936,34 +1155,55 @@ export default function App() {
           <main key="dashboard" className="page" style={{ "--dir": dir }}>
             <PageHeader title={`Hello, ${userName}`} sub={new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} />
 
+            {!schemaReady ? (
+              <div className="alert alert--neg" style={{ marginBottom: 16 }}>
+                <Icon name="alert" size={16} />
+                <span>One-time setup needed: run <b>supabase/budget_setup.sql</b> in your Supabase SQL editor to turn on budget plans and moving money.</span>
+              </div>
+            ) : !plan.saved && (
+              <section className="card plan-prompt" style={{ marginBottom: 16 }}>
+                <span className="quick__circle" style={{ background: "var(--lime)", color: "var(--ink)" }}><Icon name="sliders" /></span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="card__title">Set up your budget plan</div>
+                  <div className="card__sub">Choose your tithe and how much of each salary can go to needs and wants.</div>
+                </div>
+                <button className="btn btn--primary btn--sm" onClick={openPlan}>Set up</button>
+              </section>
+            )}
+
             <div className="dash">
               {/* Hero: spendable balance */}
               <section className="card card--ink on-ink a-hero" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 28 }}>
                 <div>
-                  <div className="eyebrow">Available to spend</div>
-                  <Money value={T.wantsBalance} className="money--hero" style={{ marginTop: 6, color: overBudget ? "#ff8a80" : undefined }} />
-                  <div className="card__sub" style={{ marginTop: 4 }}>Wants balance · {currency(T.wants)} allocated</div>
+                  <div className="eyebrow">Savings balance</div>
+                  <Money value={T.savings} className="money--hero" style={{ marginTop: 6, color: overdrawn ? "#ff8a80" : undefined }} />
+                  <div className="card__sub" style={{ marginTop: 4 }}>After tithe and spending · {currency(T.emergency + T.invested)} set aside</div>
                 </div>
 
-                <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
-                    <span style={{ color: "var(--text-on-ink-2)" }}>Wants budget used</span>
-                    <span className="num">{wPct.toFixed(0)}%</span>
-                  </div>
-                  <div className="meter" role="img" aria-label={`${wPct.toFixed(0)}% of wants budget used`}>
-                    <div className={`meter__fill${overBudget ? " meter__fill--over" : ""}`} style={{ width: `${wPct}%` }} />
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-on-ink-2)" }}>
-                    <span className="num" style={{ color: "var(--text-on-ink)", fontWeight: 700 }}>{currency(T.spent)}</span> spent all time
-                  </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {[["Needs", budget.needs], ["Wants", budget.wants]].map(([lbl, b]) => (
+                    <div key={lbl}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8, fontSize: 12, fontWeight: 600 }}>
+                        <span style={{ color: "var(--text-on-ink-2)" }}>{lbl} this month</span>
+                        <span className="num">{currency(b.spent)} <span style={{ color: "var(--text-on-ink-2)" }}>/ {currency(b.limit)}</span></span>
+                      </div>
+                      <div className="meter" role="img" aria-label={`${lbl}: ${b.pct.toFixed(0)}% of this month's limit used`}>
+                        {b.pct > 0 && <div className={`meter__fill${b.over ? " meter__fill--over" : ""}`} style={{ width: `${b.pct}%` }} />}
+                      </div>
+                    </div>
+                  ))}
+                  {budget.salary === 0 && <div style={{ fontSize: 12, color: "var(--text-on-ink-2)" }}>Limits appear once this month's salary is recorded.</div>}
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
                   <button className="quick" onClick={() => isMobile ? openSheet("income") : incomeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>
                     <span className="quick__circle"><Icon name="plus" /></span>Income
                   </button>
                   <button className="quick" onClick={() => isMobile ? openSheet("expense") : go("expenses")}>
                     <span className="quick__circle"><Icon name="up" /></span>Expense
+                  </button>
+                  <button className="quick" onClick={() => openMove("Emergency")}>
+                    <span className="quick__circle"><Icon name="shield" /></span>Set aside
                   </button>
                   <button className="quick" onClick={() => go("history")}>
                     <span className="quick__circle"><Icon name="download" /></span>Statement
@@ -973,9 +1213,9 @@ export default function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <div className="eyebrow" style={{ marginBottom: 2 }}>Set aside</div>
                   {[
-                    ["Investments", T.savInv, "trend", T.savings > 0 ? (T.savInv / T.savings) * 100 : 0],
-                    ["Emergency fund", T.savEm, "shield", T.savings > 0 ? (T.savEm / T.savings) * 100 : 0],
-                    ["Tithe given", T.tithe, "heartHand", null],
+                    ["Emergency fund", T.emergency, "shield", T.emergency + T.invested > 0 ? (T.emergency / (T.emergency + T.invested)) * 100 : 0],
+                    ["Investments", T.invested, "trend", T.emergency + T.invested > 0 ? (T.invested / (T.emergency + T.invested)) * 100 : 0],
+                    ...(T.tithe > 0 || plan.titheOn ? [["Tithe given", T.tithe, "heartHand", null]] : []),
                   ].map(([lbl, val, ic, share]) => (
                     <div key={lbl} className="tile" style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px" }}>
                       <span className="quick__circle" style={{ width: 36, height: 36 }}><Icon name={ic} size={16} /></span>
@@ -1031,7 +1271,7 @@ export default function App() {
                   {[
                     ["Income", mIncome, "pos", `${thisMonth.entries.length} ${thisMonth.entries.length === 1 ? "entry" : "entries"}`],
                     ["Spent", mSpent, null, `${thisMonth.expenses.length} ${thisMonth.expenses.length === 1 ? "expense" : "expenses"}`],
-                    ["Saved", mSaved, null, "45% of salary"],
+                    ["Kept in savings", mKept, mKept < 0 ? "neg" : null, "After tithe and spending"],
                   ].map(([lbl, val, tone, meta]) => (
                     <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderTop: lbl === "Income" ? 0 : "1px solid var(--divider)", gap: 12 }}>
                       <div>
@@ -1106,14 +1346,23 @@ export default function App() {
         {/* ══ EXPENSES ══ */}
         {tab === "expenses" && (
           <main key="expenses" className="page" style={{ "--dir": dir }}>
-            <PageHeader title="Expenses" sub="Everything you've spent from your wants balance" action={() => openSheet("expense")} actionLabel="Add expense" />
+            <PageHeader title="Expenses" sub="Everything you've spent, taken from your savings" action={() => openSheet("expense")} actionLabel="Add expense" />
 
-            <section className="card card--flush" style={{ marginBottom: 16 }}>
-              <div className="stat-strip">
-                <Stat label="Spent this month" value={mSpent} meta={monthKeyLabel(curKey)} />
-                <Stat label="Spent all time" value={T.spent} meta={`${expenses.length} expenses`} />
-                <Stat label="Wants balance" value={T.wantsBalance} tone={overBudget ? "neg" : undefined} meta={overBudget ? "Over budget" : `${(100 - wPct).toFixed(0)}% of allocation left`} />
+            <section className="card" style={{ marginBottom: 16 }}>
+              <div className="card__head" style={{ marginBottom: 18 }}>
+                <div>
+                  <div className="card__title">This month's limits</div>
+                  <div className="card__sub">{monthKeyLabel(curKey)} · <span className="num">{currency(mSpent)}</span> spent · <span className="num">{currency(T.spent)}</span> all time</div>
+                </div>
               </div>
+              {budget.salary === 0 ? (
+                <EmptyState icon="income" title="No salary recorded this month" text="Your needs and wants limits appear once this month's salary is added." />
+              ) : (
+                <div className="budget-bars">
+                  <BudgetBar label="Needs" b={budget.needs} color="var(--ink)" />
+                  <BudgetBar label="Wants" b={budget.wants} color="var(--lime-chart)" />
+                </div>
+              )}
             </section>
 
             <div className="split">
@@ -1175,30 +1424,34 @@ export default function App() {
         {/* ══ SAVINGS ══ */}
         {tab === "savings" && (
           <main key="savings" className="page" style={{ "--dir": dir }}>
-            <PageHeader title="Savings" sub="45% of every salary, set aside automatically" />
+            <PageHeader title="Savings" sub="What's left after tithe and spending. Move some into your emergency fund or investments." action={() => openMove("Emergency")} actionLabel="Set aside" />
             <div className="split" style={{ marginBottom: 16 }}>
               <section className="card card--ink" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
                 <div>
-                  <div className="eyebrow">Total savings</div>
-                  <Money value={T.savings} className="money--hero" style={{ marginTop: 6 }} />
+                  <div className="eyebrow">Savings balance</div>
+                  <Money value={T.savings} className="money--hero" style={{ marginTop: 6, color: overdrawn ? "#ff8a80" : undefined }} />
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button className="btn btn--accent" onClick={() => openMove("Emergency")}><Icon name="shield" size={16} /> Add to emergency fund</button>
+                  <button className="btn btn--secondary" onClick={() => openMove("Investment")}><Icon name="trend" size={16} /> Invest</button>
                 </div>
                 <div>
-                  <div className="stack" style={{ height: 12 }} role="img" aria-label="Savings split between investments and emergency fund">
-                    {T.savings > 0
+                  <div className="stack" style={{ height: 12 }} role="img" aria-label="Money set aside, split between emergency fund and investments">
+                    {T.emergency + T.invested > 0
                       ? <>
-                        <span style={{ flexGrow: T.savInv, background: "#ffffff" }} />
-                        <span style={{ flexGrow: T.savEm, background: "var(--lime)" }} />
+                        <span style={{ flexGrow: T.emergency, background: "var(--lime)" }} />
+                        <span style={{ flexGrow: T.invested, background: "#ffffff" }} />
                       </>
                       : <span style={{ flexGrow: 1, background: "var(--ink-3)" }} />}
                   </div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {[["Investments", T.savInv, "#ffffff", "trend"], ["Emergency fund", T.savEm, "var(--lime)", "shield"]].map(([lbl, val, col, ic]) => (
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
+                  {[["Emergency fund", T.emergency, "var(--lime)", "shield"], ["Investments", T.invested, "#ffffff", "trend"]].map(([lbl, val, col, ic]) => (
                     <div key={lbl} className="tile">
                       <div className="legend__item" style={{ fontSize: 12, fontWeight: 600, color: "var(--text-on-ink-2)" }}><span className="dot dot--sq" style={{ background: col }} />{lbl}</div>
-                      <Money value={val} className="money--lg" style={{ marginTop: 6 }} />
+                      <Money value={val} className="money--lg money--fit" style={{ marginTop: 6 }} />
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 12, color: "var(--text-on-ink-2)" }}>
-                        <Icon name={ic} size={13} /><span className="num">{T.savings > 0 ? ((val / T.savings) * 100).toFixed(0) : 0}% of savings</span>
+                        <Icon name={ic} size={13} /><span className="num">{T.emergency + T.invested > 0 ? ((val / (T.emergency + T.invested)) * 100).toFixed(0) : 0}% of set aside</span>
                       </div>
                     </div>
                   ))}
@@ -1208,15 +1461,15 @@ export default function App() {
               <section className="card">
                 <div className="card__head">
                   <div>
-                    <div className="card__title">Monthly contributions</div>
+                    <div className="card__title">Set aside each month</div>
                     <div className="card__sub">Last 12 months · average <b className="num" style={{ color: "var(--text)" }}>{currency(savings12 / 12)}</b> per month</div>
                   </div>
                   <div className="legend">
-                    <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--ink)" }} />Saved</span>
+                    <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--ink)" }} />Set aside</span>
                     <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--lime-chart)" }} />This month</span>
                   </div>
                 </div>
-                {savings12 === 0 ? <EmptyState icon="wallet" title="No contributions in the last year" text="Savings appear here when you record a salary." /> : (
+                {savings12 === 0 ? <EmptyState icon="wallet" title="Nothing set aside in the last year" text="Use Add to emergency fund or Invest to move money out of savings." /> : (
                   <div style={{ width: "100%", height: 240 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={savingsSeries} barCategoryGap="28%" margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
@@ -1224,7 +1477,7 @@ export default function App() {
                         <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--text-3)", fontSize: 12, fontWeight: 600 }} interval="preserveStartEnd" minTickGap={4} />
                         <YAxis tickFormatter={compactINR} tickLine={false} axisLine={false} width={56} tick={{ fill: "var(--text-3)", fontSize: 12 }} />
                         <Tooltip cursor={{ fill: "var(--surface-2)", radius: 8 }} content={<ChartTooltip />} />
-                        <Bar dataKey="saved" name="Saved" radius={[4, 4, 0, 0]} maxBarSize={28}>
+                        <Bar dataKey="saved" name="Set aside" radius={[4, 4, 0, 0]} maxBarSize={28}>
                           {savingsSeries.map(d => <Cell key={d.key} fill={d.current ? "var(--lime-chart)" : "var(--ink)"} />)}
                         </Bar>
                       </BarChart>
@@ -1235,13 +1488,18 @@ export default function App() {
             </div>
 
             <section className="card">
-              <div className="card__head" style={{ marginBottom: 12 }}><div className="card__title">Contributions</div></div>
-              {sortedSalaries.filter(e => e.savingsAlloc > 0).length === 0 ? <EmptyState icon="wallet" title="No savings yet" text="Record a salary and 45% will be saved here." /> : (
+              <div className="card__head" style={{ marginBottom: 12 }}><div className="card__title">Moves</div></div>
+              {moves.length === 0 ? <EmptyState icon="wallet" title="Nothing moved yet" text="Money you add to your emergency fund or invest will be listed here." /> : (
                 <div className="list">
-                  {sortedSalaries.filter(e => e.savingsAlloc > 0).map(e => (
-                    <TxRow key={e.id} icon={e.savingsTag === "Investment" ? "trend" : "shield"} iconClass={e.savingsTag === "Investment" ? "row__icon--ink" : "row__icon--lime"}
-                      title={e.savingsTag === "Investment" ? "Investments" : "Emergency fund"} meta={`${fmtDate(e.date)} · from ${currency(e.amount)} salary`} amount={e.savingsAlloc} positive />
-                  ))}
+                  {moves.map(m => {
+                    const d = DESTINATIONS[m.destination];
+                    return (
+                      <TxRow key={m.id} icon={d.icon} iconClass={m.destination === "Investment" ? "row__icon--ink" : "row__icon--lime"} title={d.label}
+                        meta={`${fmtDate(m.date)}${m.note ? ` · ${m.note}` : ""}`}
+                        amount={m.amount} positive
+                        onDelete={() => removeTransfer(m.id)} deleteLabel={`Undo move to ${d.label.toLowerCase()}`} />
+                    );
+                  })}
                 </div>
               )}
             </section>
@@ -1438,7 +1696,7 @@ export default function App() {
                 {groups.map(group => {
                   const gIncome = group.entries.reduce((s, e) => s + e.amount, 0);
                   const gSpent = group.expenses.reduce((s, e) => s + e.amount, 0);
-                  const gSaved = group.entries.reduce((s, e) => s + e.savingsAlloc, 0);
+                  const gKept = gIncome - group.entries.reduce((s, e) => s + e.tithe, 0) - gSpent;
                   const isOpen = openMonth === group.key;
                   const [yy] = group.key.split("-");
                   return (
@@ -1450,7 +1708,7 @@ export default function App() {
                           <span className="row__meta" style={{ display: "block" }}>{group.entries.length} income · {group.expenses.length} expenses</span>
                         </span>
                         <span className="month__figs">
-                          {[["Income", gIncome, "pos"], ["Spent", gSpent, ""], ["Saved", gSaved, ""]].map(([lbl, v, tone]) => (
+                          {[["Income", gIncome, "pos"], ["Spent", gSpent, ""], ["Kept", gKept, gKept < 0 ? "neg" : ""]].map(([lbl, v, tone]) => (
                             <span key={lbl} className="month__fig">
                               <span className="eyebrow" style={{ display: "block" }}>{lbl}</span>
                               <span className={`money num ${tone}`} style={{ fontWeight: 700, fontSize: 14 }}>{currency(v)}</span>
@@ -1670,6 +1928,29 @@ function Stat({ label, value, meta, tone }) {
 }
 
 // options: ["A","B"] or [["value","Label"], …]
+// A month's needs or wants limit: what's left up top, a bar of what's used, the figures underneath
+function BudgetBar({ label, b, color }) {
+  const used = Math.round(b.limit > 0 ? (b.spent / b.limit) * 100 : 0);
+  return (
+    <div className="budget-bar" data-over={b.over}>
+      <div className="budget-bar__top">
+        <span className="legend__item budget-bar__label"><span className="dot dot--sq" style={{ background: color }} />{label}</span>
+        <span className="budget-bar__left">
+          <Money value={Math.abs(b.left)} className="money--lg" />
+          <span>{b.over ? "over" : "left"}</span>
+        </span>
+      </div>
+      <div className="budget-bar__track" role="img" aria-label={`${label}: ${used}% of ${currency(b.limit)} used`}>
+        {b.spent > 0 && <div className="budget-bar__fill" style={{ width: `${b.pct}%`, background: b.over ? "var(--neg)" : color }} />}
+      </div>
+      <div className="budget-bar__foot">
+        <span><b className="num">{currency(b.spent)}</b> used</span>
+        <span className="num">{used}% of {currency(b.limit)}</span>
+      </div>
+    </div>
+  );
+}
+
 function Segmented({ options, value, onChange, label }) {
   return (
     <div className="seg" role="group" aria-label={label}>
@@ -1681,7 +1962,7 @@ function Segmented({ options, value, onChange, label }) {
   );
 }
 
-function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive, plain, amountClass, onDelete, deleteLabel }) {
+function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive, plain, amountClass, onDelete, deleteLabel, kind, onKind }) {
   const sign = plain ? "" : positive ? "+" : "−";
   // Touch: swipe left to reveal Delete; a long swipe deletes straight away
   const [x, setX] = useState(0);
@@ -1722,6 +2003,9 @@ function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive,
       </div>
       <div className="row__end">
         <div className={`row__amount ${amountClass || (positive ? "pos" : "")}`}>{sign}{currency(amount)}</div>
+        {kind && (onKind
+          ? <button type="button" className="kind-pill" data-kind={kind} onClick={onKind} title="Tap to switch need / want" aria-label={`Counts as a ${kind}. Switch to ${kind === "need" ? "want" : "need"}`}>{kind === "need" ? "Need" : "Want"}</button>
+          : <span className="kind-pill" data-kind={kind}>{kind === "need" ? "Need" : "Want"}</span>)}
       </div>
       {onDelete && (
         <button className="icon-btn icon-btn--quiet icon-btn--danger row__action" onClick={onDelete} aria-label={deleteLabel} title="Delete">
