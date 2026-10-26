@@ -1093,17 +1093,6 @@ input[type="number"] {
   display: inline-block;
 }
 
-.loading {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--s-4);
-  color: var(--text-3);
-  font-weight: 600;
-}
-
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1490,3 +1479,113 @@ img, svg { -webkit-user-drag: none; }
 @media (display-mode: standalone) {
   html, body { overscroll-behavior: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Maker's signature (footer credit)
+   ════════════════════════════════════════════════════════════════════════════ */
+.credit {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0 var(--s-4);
+}
+
+.sig {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.sig__lead {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.sig__name {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--ink);
+}
+
+/* Each letter: an invisible copy in the final face sizes the cell, so the
+   flickering glyph on top never shifts the layout */
+.sig__cell { display: inline-grid; }
+.sig__size, .sig__glyph { grid-area: 1 / 1; }
+.sig__size, .sig__glyph--final {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-style: italic;
+  font-weight: 400;
+}
+.sig__size { visibility: hidden; }
+
+.sig__glyph {
+  justify-self: center;
+  color: var(--text-3);
+  transition: color .35s var(--ease-out), filter .35s var(--ease-out), opacity .35s var(--ease-out);
+}
+.sig__glyph--idle { opacity: 0; filter: blur(6px); }
+.sig__glyph--final { color: var(--ink); filter: none; opacity: 1; }
+
+.sig__glyph--0 { font-family: "JetBrains Mono", ui-monospace, monospace; font-weight: 400; }
+.sig__glyph--1 { font-family: Georgia, serif; font-weight: 700; }
+.sig__glyph--2 { font-family: "Manrope", sans-serif; font-weight: 800; }
+.sig__glyph--3 { font-family: "Instrument Serif", serif; font-style: normal; }
+.sig__glyph--4 { font-family: "Courier New", monospace; font-weight: 700; }
+.sig__glyph--5 { font-family: "Manrope", sans-serif; font-weight: 300; }
+.sig__glyph--6 { font-family: "Times New Roman", serif; font-style: italic; }
+
+/* Lime full stop lands once the name has settled */
+.sig__dot {
+  width: 6px;
+  height: 6px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background: var(--lime);
+  transform: scale(0);
+  transition: transform .4s cubic-bezier(.34, 1.56, .64, 1);
+}
+.sig[data-settled="true"] .sig__dot { transform: scale(1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .sig__glyph--idle { opacity: 1; filter: none; color: var(--ink); font-family: "Instrument Serif", Georgia, serif; font-style: italic; }
+  .sig__dot { transform: scale(1); }
+}
+
+.credit[data-waiting="true"] .sig { visibility: hidden; }
+
+/* Launch splash */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.splash__bg { position: absolute; inset: 0; background: var(--bg); }
+
+.splash__mark {
+  position: relative;
+  transform: scale(1.6);
+  will-change: transform;
+}
+
+/* App is held hidden under the splash, then rises in once the signature has landed */
+@keyframes app-in { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+@keyframes app-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+html[data-splash="show"] .shell,
+html[data-splash="show"] .bottom-nav,
+html[data-splash="show"] .fab { opacity: 0; }
+
+html[data-splash="reveal"] .shell { animation: app-in .6s cubic-bezier(.22, 1, .36, 1) both; }
+html[data-splash="reveal"] .bottom-nav,
+html[data-splash="reveal"] .fab { animation: app-fade-in .6s cubic-bezier(.22, 1, .36, 1) both; }

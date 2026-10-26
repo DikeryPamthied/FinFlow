@@ -163,6 +163,7 @@ On screens up to 960px wide, FinFlow behaves like an installed phone app rather 
 - **Adding things:** on phones, forms open in a **bottom sheet** (`<Sheet>`). Open one from the hero's quick actions or the floating lime "Add expense / New goal / New loan" button above the nav (`.fab`, rendered by `PageHeader action`). Dismiss it by dragging the grabber down, tapping the backdrop or using back. On desktop the same forms stay inline.
 - **Deleting:** swipe a transaction row left to reveal Delete; a long swipe deletes it straight away. The hover trash icon is used on mouse devices only.
 - **Feedback:** every add and delete shows a toast (`notify()`), plus a short vibration where the phone supports it (`haptic()`).
+- **Launch splash:** while data loads, the "Built by Kery." signature plays alone in the centre (`<Splash>`). Each letter flickers through typefaces and settles into Instrument Serif italic, then a lime dot appears. Next it glides down to its footer spot, or to the bottom of the screen if the footer is out of view. Only then does the app rise in (`html[data-splash]`: show → reveal → done). Hovering over or tapping the footer signature replays it.
 - **Touch polish:**
   - Pressed states replace hover.
   - No tap-highlight flash and no double-tap zoom.
