@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
-import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie } from 'recharts';
+import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import jsPDF from 'jspdf';
 import { autoTable } from 'jspdf-autotable'; // v5: called as autoTable(doc, …), no longer patched onto jsPDF
 
@@ -2131,34 +2131,31 @@ function ChartTooltip({ active, payload }) {
 
 function CategoryBreakdown({ data }) {
   if (data.total === 0) return <EmptyState icon="receipt" title="No spending in this period" text="Expenses you add will be broken down by category here." />;
-  const legendByName = Object.fromEntries(data.legend.map(d => [d.name, d]));
-  const donut = data.donut.map(d => ({ ...d, pct: legendByName[d.name].pct }));
+  // Ranked bars instead of a rainbow donut: the biggest category is the one lime mark, the rest stay ink
+  const top = data.legend[0];
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ position: "relative", width: 156, height: 156, flexShrink: 0, margin: "0 auto" }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie data={donut} dataKey="value" nameKey="name" innerRadius="70%" outerRadius="100%" paddingAngle={donut.length > 1 ? 1.5 : 0} stroke="var(--surface)" strokeWidth={2} startAngle={90} endAngle={-270} isAnimationActive={false}>
-              {donut.map(d => <Cell key={d.name} fill={d.color} />)}
-            </Pie>
-            <Tooltip content={<ChartTooltip />} />
-          </PieChart>
-        </ResponsiveContainer>
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-          <span className="eyebrow">Total</span>
-          <span className="num" style={{ fontWeight: 700, fontSize: 15 }}>{compactINR(data.total)}</span>
-        </div>
+    <div className="cat-break">
+      <div className="cat-break__total">
+        <Money value={data.total} className="money--lg" />
+        <span className="cat-break__lead">Most on <b>{top.name}</b> · {top.pct.toFixed(0)}%</span>
       </div>
-      <div className="list" style={{ minWidth: 0 }}>
-        {data.legend.map(d => (
-          <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 13 }}>
-            <span className="dot" style={{ background: d.color, width: 10, height: 10 }} />
-            <span style={{ flex: 1, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
-            <span className="num" style={{ color: "var(--text-3)", fontWeight: 600, width: 40, textAlign: "right" }}>{d.pct.toFixed(0)}%</span>
-            <span className="num" style={{ fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>{currency(d.value)}</span>
-          </div>
+      <ul className="cat-break__list">
+        {data.legend.map((d, i) => (
+          <li key={d.name} className="cat-break__row">
+            <span className="cat-break__icon" aria-hidden="true"><Icon name={catMeta(d.name).icon} size={15} /></span>
+            <div className="cat-break__body">
+              <div className="cat-break__top">
+                <span className="cat-break__name">{d.name}</span>
+                <span className="cat-break__pct num">{d.pct.toFixed(0)}%</span>
+                <span className="cat-break__amt num">{currency(d.value)}</span>
+              </div>
+              <div className="cat-break__track">
+                <div className="cat-break__fill" data-top={i === 0} style={{ width: `${Math.max(d.pct, 1.5)}%` }} />
+              </div>
+            </div>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }
