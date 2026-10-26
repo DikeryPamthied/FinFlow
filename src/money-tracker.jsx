@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { supabase } from "./supabaseClient";
-import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie } from 'recharts';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 
@@ -11,10 +11,46 @@ const localToday = () => {
 };
 const parseLocal = (iso) => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d); };
 const fmtDate = (iso) => parseLocal(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-const fmtMonth = (iso) => parseLocal(iso).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 const monthKey = (iso) => { const d = parseLocal(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const monthKeyLabel = (k) => { const [y, m] = k.split("-"); return new Date(+y, +m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }); };
+const monthShort = (k) => { const [y, m] = k.split("-"); return new Date(+y, +m - 1, 1).toLocaleDateString("en-US", { month: "short" }); };
+const addMonths = (k, delta) => { const [y, m] = k.split("-").map(Number); const d = new Date(y, m - 1 + delta, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
+const monthsBetween = (a, b) => { const [ay, am] = a.split("-").map(Number); const [by, bm] = b.split("-").map(Number); return (by - ay) * 12 + (bm - am); };
+const dayLabel = (iso) => {
+  const today = localToday();
+  if (iso === today) return "Today";
+  const y = parseLocal(today); y.setDate(y.getDate() - 1);
+  const yIso = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, "0")}-${String(y.getDate()).padStart(2, "0")}`;
+  if (iso === yIso) return "Yesterday";
+  return parseLocal(iso).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+};
 const currency = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(n || 0);
+const compactINR = (n) => "₹" + new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(n || 0);
+const sum = (arr, f) => arr.reduce((s, x) => s + (f(x) || 0), 0);
+
+const readLocalArray = (key) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+};
+
+// Expense categories — fixed order maps to the validated categorical palette (--cat-1…8)
+const CATEGORIES = [
+  { id: "General", icon: "tag", color: "var(--cat-1)" },
+  { id: "Food", icon: "food", color: "var(--cat-2)" },
+  { id: "Transport", icon: "car", color: "var(--cat-3)" },
+  { id: "Bills", icon: "bolt", color: "var(--cat-4)" },
+  { id: "Health", icon: "heart", color: "var(--cat-5)" },
+  { id: "Entertainment", icon: "play", color: "var(--cat-6)" },
+  { id: "Shopping", icon: "bag", color: "var(--cat-7)" },
+  { id: "Other", icon: "box", color: "var(--cat-8)" },
+];
+const catMeta = (tag) => CATEGORIES.find(c => c.id === tag) || CATEGORIES[CATEGORIES.length - 1];
+
+const GOAL_COLORS = ["var(--c-ink)", "var(--c-lime)", "var(--c-blue)", "var(--c-orange)", "var(--c-green)", "var(--c-rose)"];
 
 // ─── Supabase helpers ─────────────────────────────────────────────────────────
 async function loadData() {
@@ -47,6 +83,70 @@ function groupByMonth(salaryEntries, expenses) {
   return Object.values(g).sort((a, b) => b.key.localeCompare(a.key));
 }
 
+// Groups an already-sorted list into consecutive day buckets
+function groupByDay(list) {
+  const out = [];
+  list.forEach(item => {
+    const last = out[out.length - 1];
+    if (last && last.date === item.date) last.items.push(item);
+    else out.push({ date: item.date, items: [item] });
+  });
+  return out;
+}
+
+// ─── Icons ────────────────────────────────────────────────────────────────────
+const ICONS = {
+  grid: <><rect x="3.5" y="3.5" width="7" height="7" rx="2" /><rect x="13.5" y="3.5" width="7" height="7" rx="2" /><rect x="3.5" y="13.5" width="7" height="7" rx="2" /><rect x="13.5" y="13.5" width="7" height="7" rx="2" /></>,
+  receipt: <><path d="M6 3h12v18l-2.5-1.5L13 21l-2.5-1.5L8 21l-2-1.2z" /><path d="M9 8h6M9 12h6M9 16h3" /></>,
+  wallet: <><path d="M19 7V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3" /><path d="M21 10h-5a2 2 0 0 0 0 4h5z" /></>,
+  target: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></>,
+  swap: <><path d="M4 8h15l-4-4" /><path d="M20 16H5l4 4" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  plus: <path d="M12 5v14M5 12h14" />,
+  up: <path d="M7 17L17 7M8 7h9v9" />,
+  down: <path d="M17 7L7 17M16 17H7V8" />,
+  download: <><path d="M12 4v11M7 10l5 5 5-5" /><path d="M5 20h14" /></>,
+  logout: <><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" /><path d="M10 17l-5-5 5-5M5 12h11" /></>,
+  search: <><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></>,
+  trash: <><path d="M4 7h16M10 11v6M14 11v6" /><path d="M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
+  check: <path d="M5 12l5 5L20 7" />,
+  calendar: <><rect x="3.5" y="5" width="17" height="15.5" rx="3" /><path d="M3.5 10h17M8 3v4M16 3v4" /></>,
+  chevDown: <path d="M6 9l6 6 6-6" />,
+  chevLeft: <path d="M15 6l-6 6 6 6" />,
+  chevRight: <path d="M9 6l6 6-6 6" />,
+  shield: <path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" />,
+  trend: <><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></>,
+  heartHand: <><path d="M12 20s-7-4.5-9-9a5 5 0 0 1 9-3 5 5 0 0 1 9 3c-2 4.5-9 9-9 9z" /></>,
+  alert: <><circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16.5v.5" /></>,
+  tag: <><path d="M3.5 12V4.5a1 1 0 0 1 1-1H12l8.5 8.5-8.5 8.5z" /><circle cx="8" cy="8" r="1.3" /></>,
+  food: <><path d="M6 3v7a3 3 0 0 0 6 0V3M9 3v18" /><path d="M17 3c-2 2-2.5 6 0 8v10" /></>,
+  car: <><path d="M3.5 16.5V12l2-5.5h13l2 5.5v4.5z" /><path d="M3.5 12h17" /><circle cx="7.5" cy="16.5" r="1.8" /><circle cx="16.5" cy="16.5" r="1.8" /></>,
+  bolt: <path d="M13 2.5L4.5 14H11l-1 7.5L19.5 10H13z" />,
+  heart: <path d="M12 20s-7-4.5-9-9a5 5 0 0 1 9-3 5 5 0 0 1 9 3c-2 4.5-9 9-9 9z" />,
+  play: <><circle cx="12" cy="12" r="9" /><path d="M10 8.5l5.5 3.5-5.5 3.5z" /></>,
+  bag: <><path d="M5 8h14l-1 12.5H6z" /><path d="M9 8V6.5a3 3 0 0 1 6 0V8" /></>,
+  box: <><path d="M3.5 7.5L12 3.5l8.5 4v9L12 20.5l-8.5-4z" /><path d="M3.5 7.5L12 11.5l8.5-4M12 11.5v9" /></>,
+  income: <path d="M12 4v16M6 14l6 6 6-6" />,
+};
+
+function Icon({ name, size = 18, stroke = 1.8, style }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={style}>
+      {ICONS[name]}
+    </svg>
+  );
+}
+
+function LogoMark({ size = 34 }) {
+  return (
+    <span className="logo-mark" style={{ width: size, height: size }}>
+      <svg width={size * 0.55} height={size * 0.55} viewBox="0 0 24 24" fill="none" stroke="var(--lime)" strokeWidth="3" strokeLinecap="round" aria-hidden="true">
+        <path d="M6 18v-5M12 18V6M18 18v-8" />
+      </svg>
+    </span>
+  );
+}
+
 // ─── Auth Screen ──────────────────────────────────────────────────────────────
 function Auth() {
   const [loading, setLoading] = useState(false);
@@ -54,7 +154,6 @@ function Auth() {
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
   const [err, setErr] = useState("");
-  const [focusedField, setFocusedField] = useState(null);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -67,50 +166,59 @@ function Auth() {
     setLoading(false);
   };
 
-  return (
-    <div style={{ background: "var(--bg)", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, position: "relative", overflow: "hidden" }}>
-      {/* Animated background orbs */}
-      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0 }}>
-        <div style={{ position: "absolute", top: "15%", left: "20%", width: 500, height: 500, background: "radial-gradient(circle,rgba(240,192,64,.07) 0%,transparent 60%)", animation: "orb-move-1 12s ease-in-out infinite" }} />
-        <div style={{ position: "absolute", bottom: "10%", right: "15%", width: 400, height: 400, background: "radial-gradient(circle,rgba(45,226,213,.06) 0%,transparent 60%)", animation: "orb-move-2 15s ease-in-out infinite" }} />
-        <div style={{ position: "absolute", top: "50%", left: "60%", width: 300, height: 300, background: "radial-gradient(circle,rgba(167,139,250,.05) 0%,transparent 60%)", animation: "orb-move-1 18s 3s ease-in-out infinite" }} />
-      </div>
+  const ok = err.startsWith("✓");
 
-      <div className="anim-fade-up" style={{ width: "100%", maxWidth: 420, position: "relative", zIndex: 1 }}>
-        {/* Logo */}
-        <div style={{ textAlign: "center", marginBottom: 40 }}>
-          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 64, height: 64, background: "var(--grad-gold)", borderRadius: 18, marginBottom: 18, boxShadow: "0 0 40px rgba(240,192,64,0.35)", animation: "float 6s ease-in-out infinite" }}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 14.93V18h-2v-1.07C9.39 16.57 8 15.4 8 14c0-.55.45-1 1-1s1 .45 1 1c0 .48.64.68 1 .37V11H9V9h2V8h2v1h1a3 3 0 0 1 0 6h-1v1.93c1.52-.27 2.72-1.26 3-2.93z" fill="#050508" />
-            </svg>
+  return (
+    <div className="auth">
+      <div className="auth__panel rise">
+        <div className="auth__brand">
+          <div className="brand" style={{ color: "var(--text-on-ink)" }}>
+            <span className="logo-mark" style={{ background: "var(--lime)" }}>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="var(--ink)" strokeWidth="3" strokeLinecap="round" aria-hidden="true"><path d="M6 18v-5M12 18V6M18 18v-8" /></svg>
+            </span>
+            FinFlow
           </div>
-          <h1 style={{ fontFamily: "var(--font-ui)", fontSize: 34, fontWeight: 800, letterSpacing: -1, color: "var(--text)", marginBottom: 6 }}>
-            Fin<span style={{ background: "var(--grad-gold)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Flow</span>
-          </h1>
-          <p style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)", letterSpacing: 4, textTransform: "uppercase" }}>Wealth Intelligence</p>
+          <div>
+            <h1 style={{ fontSize: 34, lineHeight: "40px", fontWeight: 600, letterSpacing: "-0.03em", marginBottom: 12 }}>Know where every rupee goes.</h1>
+            <p style={{ color: "var(--text-on-ink-2)", fontSize: 15, lineHeight: "22px" }}>Income is split automatically into tithe, wants and savings, so you always know what's safe to spend.</p>
+          </div>
+          <div className="auth__features" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {[["Automatic 10 / 45 / 45 split", "trend"], ["Synced securely to the cloud", "shield"], ["CSV & PDF statements", "download"]].map(([t, ic]) => (
+              <div key={t} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 14, fontWeight: 600 }}>
+                <span className="quick__circle" style={{ width: 36, height: 36 }}><Icon name={ic} size={16} /></span>
+                {t}
+              </div>
+            ))}
+          </div>
         </div>
 
-        {/* Card */}
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-xl)", padding: "36px 36px", backdropFilter: "blur(24px)", boxShadow: "0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04) inset" }}>
-          <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6, letterSpacing: -0.5 }}>{isSignUp ? "Create Account" : "Welcome Back"}</h2>
-          <p style={{ fontSize: 13, color: "var(--text-mid)", marginBottom: 28 }}>{isSignUp ? "Start tracking your wealth journey" : "Sign in to your financial dashboard"}</p>
+        <div className="auth__form">
+          <h2 style={{ fontSize: 24, lineHeight: "30px", fontWeight: 600, letterSpacing: "-0.02em" }}>{isSignUp ? "Create your account" : "Welcome back"}</h2>
+          <p style={{ color: "var(--text-3)", marginTop: 4, marginBottom: 28 }}>{isSignUp ? "Start tracking your money in minutes." : "Sign in to your dashboard."}</p>
 
           <form onSubmit={handleAuth} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <AuthInput label="Email Address" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} focused={focusedField === "email"} onFocus={() => setFocusedField("email")} onBlur={() => setFocusedField(null)} required />
-            <AuthInput label="Password" type="password" placeholder="••••••••••" value={password} onChange={e => setPassword(e.target.value)} focused={focusedField === "password"} onFocus={() => setFocusedField("password")} onBlur={() => setFocusedField(null)} required />
+            <label className="field">
+              <span className="field__label">Email address</span>
+              <input className="input" type="email" placeholder="you@example.com" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required />
+            </label>
+            <label className="field">
+              <span className="field__label">Password</span>
+              <input className="input" type="password" placeholder="••••••••" autoComplete={isSignUp ? "new-password" : "current-password"} value={password} onChange={e => setPassword(e.target.value)} required />
+            </label>
 
             {err && (
-              <div className="anim-fade-in" style={{ fontSize: 12, color: err.startsWith("✓") ? "var(--teal)" : "var(--rose)", background: err.startsWith("✓") ? "var(--teal-dim)" : "var(--rose-dim)", padding: "11px 14px", borderRadius: "var(--radius-sm)", border: `1px solid ${err.startsWith("✓") ? "rgba(45,226,213,.2)" : "rgba(255,94,126,.2)"}` }}>
-                {err}
+              <div className={`alert fade ${ok ? "alert--pos" : "alert--neg"}`} role="status">
+                <Icon name={ok ? "check" : "alert"} size={16} />
+                <span>{ok ? err.slice(2) : err}</span>
               </div>
             )}
 
-            <GoldButton type="submit" disabled={loading} style={{ marginTop: 4 }}>
-              {loading ? <LoadingSpinner /> : (isSignUp ? "Create Account →" : "Sign In →")}
-            </GoldButton>
+            <button type="submit" className="btn btn--primary btn--block" disabled={loading} style={{ marginTop: 6 }}>
+              {loading ? <span className="spinner" /> : (isSignUp ? "Create account" : "Sign in")}
+            </button>
 
-            <button type="button" onClick={() => { setIsSignUp(!isSignUp); setErr(""); }} style={{ background: "none", border: "none", color: "var(--text-mid)", fontSize: 13, cursor: "pointer", paddingTop: 4, transition: "color .2s" }}>
-              {isSignUp ? "Already have an account? Sign In" : "No account yet? Sign Up"}
+            <button type="button" onClick={() => { setIsSignUp(!isSignUp); setErr(""); }} className="btn btn--sm" style={{ color: "var(--text-2)" }}>
+              {isSignUp ? "Already have an account? Sign in" : "No account yet? Sign up"}
             </button>
           </form>
         </div>
@@ -119,43 +227,14 @@ function Auth() {
   );
 }
 
-function AuthInput({ label, type, placeholder, value, onChange, focused, onFocus, onBlur, required }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <label style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: focused ? "var(--gold)" : "var(--text-dim)", letterSpacing: 2, textTransform: "uppercase", transition: "color .2s" }}>{label}</label>
-      <input
-        type={type} placeholder={placeholder} value={value} onChange={onChange}
-        onFocus={onFocus} onBlur={onBlur} required={required}
-        style={{
-          background: "rgba(255,255,255,0.04)",
-          border: `1px solid ${focused ? "rgba(240,192,64,0.5)" : "var(--border-hi)"}`,
-          borderRadius: "var(--radius-sm)",
-          padding: "13px 16px",
-          fontFamily: "var(--font-ui)", fontSize: 15, color: "var(--text)", outline: "none",
-          transition: "all .25s var(--ease)",
-          boxShadow: focused ? "0 0 0 3px rgba(240,192,64,0.08)" : "none"
-        }}
-      />
-    </div>
-  );
-}
-
 // ─── Loading Screen ───────────────────────────────────────────────────────────
 function LoadingScreen() {
   return (
-    <div style={{ background: "var(--bg)", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20 }}>
-      <div style={{ position: "relative", width: 48, height: 48 }}>
-        <div style={{ position: "absolute", inset: 0, borderRadius: "50%", border: "2px solid var(--border)" }}>
-          <div style={{ position: "absolute", inset: 0, borderRadius: "50%", border: "2px solid transparent", borderTopColor: "var(--gold)", animation: "spin 0.9s linear infinite" }} />
-        </div>
-      </div>
-      <p style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)", letterSpacing: 3, textTransform: "uppercase", animation: "fadeIn 1s ease both" }}>Connecting to Cloud…</p>
+    <div className="loading">
+      <LogoMark size={44} />
+      <span style={{ display: "flex", alignItems: "center", gap: 10 }}><span className="spinner" style={{ width: 14, height: 14 }} /> Loading your finances…</span>
     </div>
   );
-}
-
-function LoadingSpinner() {
-  return <div style={{ width: 16, height: 16, border: "2px solid rgba(5,5,8,.3)", borderTopColor: "#050508", borderRadius: "50%", animation: "spin 0.7s linear infinite", margin: "0 auto" }} />;
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -164,11 +243,10 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [salaryEntries, setSalaryEntries] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [goals, setGoals] = useState([]);
-  const [loans, setLoans] = useState([]);
+  const [goals, setGoals] = useState(() => readLocalArray('finflow_goals'));
+  const [loans, setLoans] = useState(() => readLocalArray('finflow_loans'));
   const [tab, setTab] = useState("dashboard");
   const [openMonth, setOpenMonth] = useState(null);
-  const [mobileNav, setMobileNav] = useState(false);
 
   // Salary form
   const [sAmt, setSAmt] = useState("");
@@ -182,6 +260,12 @@ export default function App() {
   const [eDate, setEDate] = useState(localToday);
   const [eTag, setETag] = useState("General");
 
+  // Expense list controls
+  const [eQuery, setEQuery] = useState("");
+  const [eFilter, setEFilter] = useState("All");
+  const [eSort, setESort] = useState("newest");
+  const [eLimit, setELimit] = useState(30);
+
   // Export form
   const [expType, setExpType] = useState("Month");
   const [expMonth, setExpMonth] = useState(monthKey(localToday()));
@@ -191,25 +275,26 @@ export default function App() {
   // Goals form
   const [gName, setGName] = useState("");
   const [gTarget, setGTarget] = useState("");
-  const [gColor, setGColor] = useState("var(--gold)");
+  const [gColor, setGColor] = useState("var(--c-ink)");
+  const [fundAmts, setFundAmts] = useState({});
 
   // Lending form
   const [lName, setLName] = useState("");
   const [lAmt, setLAmt] = useState("");
   const [lDate, setLDate] = useState(localToday);
   const [lNote, setLNote] = useState("");
+  const [repayAmts, setRepayAmts] = useState({});
+
+  // Chart controls
+  const [flowRange, setFlowRange] = useState("6M");
+  const [catScope, setCatScope] = useState("month");
+
+  const incomeFormRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
     return () => subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    const savedGoals = JSON.parse(localStorage.getItem('finflow_goals') || '[]');
-    const savedLoans = JSON.parse(localStorage.getItem('finflow_loans') || '[]');
-    setGoals(savedGoals);
-    setLoans(savedLoans);
   }, []);
 
   useEffect(() => {
@@ -234,6 +319,63 @@ export default function App() {
   const pTithe = isExtra ? 0 : prevAmt * 0.1;
   const pWants = isExtra ? prevAmt : prevAmt * 0.9 * 0.5;
   const pSavings = isExtra ? 0 : prevAmt * 0.9 * 0.5;
+
+  // ── Derived views (presentation only — totals above remain the source of truth) ──
+  const curKey = monthKey(localToday());
+  const prevKey = addMonths(curKey, -1);
+  const monthOf = (k) => groups.find(g => g.key === k) || { key: k, entries: [], expenses: [] };
+  const thisMonth = monthOf(curKey);
+  const lastMonth = monthOf(prevKey);
+  const mIncome = sum(thisMonth.entries, e => e.amount);
+  const mSpent = sum(thisMonth.expenses, e => e.amount);
+  const mSaved = sum(thisMonth.entries, e => e.savingsAlloc);
+  const lmSpent = sum(lastMonth.expenses, e => e.amount);
+  const spentDelta = lmSpent > 0 ? ((mSpent - lmSpent) / lmSpent) * 100 : null;
+
+  const flowSeries = useMemo(() => {
+    const nowKey = monthKey(localToday());
+    const latest = groups[0]?.key && groups[0].key > nowKey ? groups[0].key : nowKey;
+    const earliest = groups[groups.length - 1]?.key || latest;
+    const n = flowRange === "6M" ? 6 : flowRange === "12M" ? 12 : Math.max(1, monthsBetween(earliest, latest) + 1);
+    const byKey = Object.fromEntries(groups.map(g => [g.key, g]));
+    return Array.from({ length: n }, (_, i) => {
+      const k = addMonths(latest, i - (n - 1));
+      const g = byKey[k];
+      return { key: k, label: monthShort(k), full: monthKeyLabel(k), income: g ? sum(g.entries, e => e.amount) : 0, spent: g ? sum(g.expenses, e => e.amount) : 0 };
+    });
+  }, [groups, flowRange]);
+  const flowIncome = sum(flowSeries, d => d.income);
+  const flowSpent = sum(flowSeries, d => d.spent);
+
+  const catData = useMemo(() => {
+    const nowKey = monthKey(localToday());
+    const src = catScope === "month" ? expenses.filter(e => monthKey(e.date) === nowKey) : expenses;
+    const totals = {};
+    src.forEach(e => { const id = catMeta(e.tag).id === e.tag ? e.tag : "Other"; totals[id] = (totals[id] || 0) + (e.amount || 0); });
+    const total = sum(Object.values(totals), v => v);
+    const donut = CATEGORIES.filter(c => totals[c.id] > 0).map(c => ({ name: c.id, value: totals[c.id], color: c.color }));
+    const legend = [...donut].sort((a, b) => b.value - a.value).map(d => ({ ...d, pct: total > 0 ? (d.value / total) * 100 : 0 }));
+    return { total, donut, legend };
+  }, [expenses, catScope]);
+
+  const activity = useMemo(() => {
+    const items = [
+      ...salaryEntries.map(s => ({ kind: "income", id: `s-${s.id}`, rawId: s.id, date: s.date, amount: s.amount, entry: s })),
+      ...expenses.map(e => ({ kind: "expense", id: `e-${e.id}`, rawId: e.id, date: e.date, amount: e.amount, entry: e })),
+    ].sort((a, b) => b.date.localeCompare(a.date));
+    return groupByDay(items.slice(0, 8));
+  }, [salaryEntries, expenses]);
+
+  const savingsSeries = useMemo(() => {
+    const nowKey = monthKey(localToday());
+    const byKey = Object.fromEntries(groups.map(g => [g.key, g]));
+    return Array.from({ length: 12 }, (_, i) => {
+      const k = addMonths(nowKey, i - 11);
+      const g = byKey[k];
+      return { key: k, label: monthShort(k), full: monthKeyLabel(k), saved: g ? sum(g.entries, e => e.savingsAlloc) : 0, current: k === nowKey };
+    });
+  }, [groups]);
+  const savings12 = sum(savingsSeries, d => d.saved);
 
   const addSalary = async () => {
     const amount = parseFloat(sAmt);
@@ -340,13 +482,13 @@ export default function App() {
     e.forEach(x => {
       rows.push([x.date, "Expense", `${x.name} (${x.tag})`, `-${x.amount}`, ""]);
     });
-    
+
     rows.sort((a, b) => {
-      if(a[0] === "Date") return -1;
-      if(b[0] === "Date") return 1;
+      if (a[0] === "Date") return -1;
+      if (b[0] === "Date") return 1;
       return b[0].localeCompare(a[0]);
     });
-    
+
     if (format === 'csv') {
       const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -366,13 +508,13 @@ export default function App() {
       doc.setTextColor(100);
       doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 30);
       doc.text(`Period: ${expType === "Month" ? monthKeyLabel(expMonth) : `${fmtDate(expStart)} to ${fmtDate(expEnd)}`}`, 14, 36);
-      
+
       doc.autoTable({
         startY: 42,
         head: [rows[0]],
         body: rows.slice(1),
         theme: 'grid',
-        headStyles: { fillColor: [240, 192, 64], textColor: [5, 5, 8] },
+        headStyles: { fillColor: [18, 19, 22], textColor: [210, 242, 75] },
         styles: { fontSize: 9 }
       });
       doc.save(`Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.pdf`);
@@ -381,593 +523,915 @@ export default function App() {
 
   const handleSignOut = () => supabase.auth.signOut();
   const sortedSalaries = [...salaryEntries].sort((a, b) => b.date.localeCompare(a.date));
-  const sortedExpenses = [...expenses].sort((a, b) => b.date.localeCompare(a.date));
+
+  // Expense list: search, category filter, sort
+  const expenseView = useMemo(() => {
+    const q = eQuery.trim().toLowerCase();
+    let list = expenses.filter(e => (eFilter === "All" || e.tag === eFilter) && (!q || e.name?.toLowerCase().includes(q) || e.tag?.toLowerCase().includes(q)));
+    const sorters = {
+      newest: (a, b) => b.date.localeCompare(a.date),
+      oldest: (a, b) => a.date.localeCompare(b.date),
+      highest: (a, b) => b.amount - a.amount,
+      lowest: (a, b) => a.amount - b.amount,
+    };
+    list = [...list].sort(sorters[eSort]);
+    return { list, total: sum(list, e => e.amount) };
+  }, [expenses, eQuery, eFilter, eSort]);
 
   if (!session) return <Auth />;
   if (!loaded) return <LoadingScreen />;
 
   const TABS = [
-    { id: "dashboard", label: "Dashboard", icon: "⊞" },
-    { id: "expenses", label: "Expenses", icon: "◎" },
-    { id: "savings", label: "Savings", icon: "◈" },
-    { id: "goals", label: "Goals", icon: "🎯" },
-    { id: "lending", label: "Lending", icon: "🤝" },
-    { id: "history", label: "History", icon: "≡" },
+    { id: "dashboard", label: "Dashboard", icon: "grid" },
+    { id: "expenses", label: "Expenses", icon: "receipt" },
+    { id: "savings", label: "Savings", icon: "wallet" },
+    { id: "goals", label: "Goals", icon: "target" },
+    { id: "lending", label: "Lending", icon: "swap" },
+    { id: "history", label: "History", icon: "clock" },
   ];
 
+  const go = (id) => { setTab(id); window.scrollTo({ top: 0 }); };
+  const userName = session.user?.email?.split("@")[0] || "there";
+  const activeLoans = loans.filter(l => l.status === 'pending');
+  const repaidLoans = loans.filter(l => l.status === 'repaid');
+  const overBudget = T.wantsBalance < 0;
+
+  const salaryRowProps = (e, onDelete) => {
+    const extra = e.savingsTag === "Extra";
+    return {
+      icon: "income",
+      iconClass: extra ? "row__icon--lime" : "row__icon--ink",
+      title: extra ? "Extra income" : `Salary · ${e.savingsTag}`,
+      meta: extra ? `${fmtDate(e.date)} · 100% to wants` : `Tithe ${currency(e.tithe)} · Wants ${currency(e.wantsAlloc)} · Savings ${currency(e.savingsAlloc)}`,
+      amount: e.amount, positive: true, onDelete, deleteLabel: "Delete income entry",
+    };
+  };
+  const expenseRowProps = (e, onDelete, showDate = true) => {
+    const c = catMeta(e.tag);
+    return {
+      icon: c.icon, iconColor: c.color, title: e.name,
+      meta: showDate ? `${e.tag} · ${fmtDate(e.date)}` : e.tag,
+      amount: e.amount, positive: false, onDelete, deleteLabel: `Delete expense ${e.name}`,
+    };
+  };
+
   return (
-    <div style={{ background: "var(--bg)", minHeight: "100vh", color: "var(--text)", fontFamily: "var(--font-ui)", position: "relative" }}>
-      {/* Global CSS */}
-      <style>{`
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-        @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes card-enter{from{opacity:0;transform:translateY(24px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
-        @keyframes bar-grow{from{width:0%}}
-        @keyframes orb-move-1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(60px,-40px) scale(1.1)}}
-        @keyframes orb-move-2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-50px,30px) scale(.9)}}
-        @keyframes float{0%,100%{transform:translateY(0) rotate(0)}33%{transform:translateY(-8px) rotate(1deg)}66%{transform:translateY(-4px) rotate(-1deg)}}
-        .ff-input:focus{border-color:rgba(240,192,64,.5)!important;box-shadow:0 0 0 3px rgba(240,192,64,.08)!important}
-        .ff-btn-ghost:hover{background:rgba(255,255,255,.06)!important;color:var(--text)!important}
-        .ff-tab:hover:not(.active){background:rgba(255,255,255,.04)!important;color:var(--text-mid)!important}
-        .ff-row:hover{transform:translateX(4px);background:rgba(255,255,255,.04)!important;border-color:var(--border-hi)!important}
-        .ff-del:hover{color:var(--rose)!important;background:var(--rose-dim)!important;border-radius:6px;transform:scale(1.1)}
-        .ff-month:hover{background:rgba(255,255,255,.03)!important}
-        .ff-card{transition:all .35s cubic-bezier(0.34,1.56,0.64,1)!important}
-        .ff-card:hover{border-color:var(--border-hi)!important;transform:translateY(-4px) scale(1.015);box-shadow:0 16px 48px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,0.05) inset!important}
-        select option{background:var(--surface-2);color:var(--text)}
-        .ff-gold-btn:hover{box-shadow:0 8px 32px rgba(240,192,64,.35)!important;transform:translateY(-2px) scale(1.02)}
-        .ff-gold-btn:active{transform:scale(0.96) translateY(0)!important}
-        .ff-teal-btn:hover{box-shadow:0 8px 32px rgba(45,226,213,.25)!important;transform:translateY(-2px) scale(1.02)}
-        .ff-teal-btn:active{transform:scale(0.96) translateY(0)!important}
-        .ff-tab:active{transform:scale(0.92)!important}
-        .ff-btn-ghost:active{transform:scale(0.92)!important}
-        .ff-tag-btn:hover{opacity:.85}
-        @media(max-width:640px){
-          .ff-nav-desktop{display:none!important}
-          .ff-mobile-menu{display:flex!important}
-        }
-        @media(min-width:641px){
-          .ff-mobile-toggle{display:none!important}
-          .ff-mobile-overlay{display:none!important}
-        }
-      `}</style>
+    <>
+      <div className="shell">
+        {/* ── Top bar ── */}
+        <header className="topbar">
+          <div className="brand"><LogoMark /> FinFlow</div>
 
-      {/* Ambient Orbs */}
-      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0, overflow: "hidden" }}>
-        <div style={{ position: "absolute", top: "-10%", right: "-5%", width: 600, height: 600, background: "radial-gradient(circle,rgba(240,192,64,.05) 0%,transparent 60%)", animation: "orb-move-1 16s ease-in-out infinite" }} />
-        <div style={{ position: "absolute", bottom: "-5%", left: "-5%", width: 500, height: 500, background: "radial-gradient(circle,rgba(45,226,213,.04) 0%,transparent 60%)", animation: "orb-move-2 20s ease-in-out infinite" }} />
-      </div>
-
-      {/* Main Container */}
-      <div style={{ maxWidth: 1140, margin: "0 auto", padding: "0 20px 100px", position: "relative", zIndex: 1 }}>
-
-        {/* ── NAV ── */}
-        <nav style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "22px 0 24px", marginBottom: 32, borderBottom: "1px solid var(--border)", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 36, height: 36, background: "var(--grad-gold)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 20px rgba(240,192,64,.3)" }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 14.93V18h-2v-1.07C9.39 16.57 8 15.4 8 14c0-.55.45-1 1-1s1 .45 1 1c0 .48.64.68 1 .37V11H9V9h2V8h2v1h1a3 3 0 0 1 0 6h-1v1.93c1.52-.27 2.72-1.26 3-2.93z" fill="#050508" /></svg>
-            </div>
-            <div>
-              <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>Fin<span style={{ background: "var(--grad-gold)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Flow</span></span>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 3, textTransform: "uppercase", marginTop: 1 }}>Wealth Tracker</div>
-            </div>
-          </div>
-
-          {/* Desktop Tabs */}
-          <div className="ff-nav-desktop" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ display: "flex", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 4, gap: 2 }}>
-              {TABS.map(({ id, label, icon }) => (
-                <button key={id} className={`ff-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)} style={{
-                  padding: "8px 20px", borderRadius: 9, border: "none",
-                  background: tab === id ? "var(--surface-3)" : "transparent",
-                  color: tab === id ? "var(--gold)" : "var(--text-dim)",
-                  fontSize: 13, fontWeight: 600, cursor: "pointer", letterSpacing: .2,
-                  transition: "all .22s var(--ease)",
-                  boxShadow: tab === id ? "0 2px 8px rgba(0,0,0,.3)" : "none",
-                }}>{icon} {label}</button>
-              ))}
-            </div>
-            <button onClick={handleSignOut} className="ff-btn-ghost" style={{ background: "none", border: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11, padding: "8px 14px", borderRadius: 8, letterSpacing: 1.5, textTransform: "uppercase", transition: "all .2s" }}>Out</button>
-          </div>
-
-          {/* Mobile Toggle */}
-          <button className="ff-mobile-toggle" onClick={() => setMobileNav(!mobileNav)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px", color: "var(--text-mid)", display: "none", flexDirection: "column", gap: 4 }}>
-            <span style={{ display: "block", width: 18, height: 2, background: "currentColor", borderRadius: 1, transition: "transform .2s", transform: mobileNav ? "rotate(45deg) translate(4px,4px)" : "none" }} />
-            <span style={{ display: "block", width: 18, height: 2, background: "currentColor", borderRadius: 1, opacity: mobileNav ? 0 : 1, transition: "opacity .2s" }} />
-            <span style={{ display: "block", width: 18, height: 2, background: "currentColor", borderRadius: 1, transition: "transform .2s", transform: mobileNav ? "rotate(-45deg) translate(4px,-4px)" : "none" }} />
-          </button>
-        </nav>
-
-        {/* Mobile Nav Dropdown */}
-        {mobileNav && (
-          <div className="ff-mobile-overlay anim-fade-up" style={{ background: "var(--surface-2)", border: "1px solid var(--border-hi)", borderRadius: 16, padding: 12, marginBottom: 24, display: "flex", flexDirection: "column", gap: 4 }}>
+          <nav className="topnav" aria-label="Primary">
             {TABS.map(({ id, label, icon }) => (
-              <button key={id} onClick={() => { setTab(id); setMobileNav(false); }} style={{
-                display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 10, border: "none",
-                background: tab === id ? "var(--surface-3)" : "transparent",
-                color: tab === id ? "var(--gold)" : "var(--text-mid)",
-                fontSize: 14, fontWeight: 600, cursor: "pointer", textAlign: "left",
-                transition: "all .2s",
-              }}>{icon} {label}</button>
+              <button key={id} className="topnav__item" aria-current={tab === id ? "page" : undefined} onClick={() => go(id)}>
+                <Icon name={icon} size={16} /> {label}
+              </button>
             ))}
-            <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
-            <button onClick={handleSignOut} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 10, border: "none", background: "none", color: "var(--text-dim)", fontSize: 14, cursor: "pointer" }}>← Sign Out</button>
+          </nav>
+
+          <div className="topbar__end">
+            <div className="user-chip" title={session.user?.email}>
+              <span className="avatar">{userName.charAt(0)}</span>
+              <span className="user-chip__name">{userName}</span>
+            </div>
+            <button className="icon-btn icon-btn--solid" onClick={handleSignOut} aria-label="Sign out" title="Sign out" style={{ width: 40, height: 40 }}>
+              <Icon name="logout" size={18} />
+            </button>
           </div>
-        )}
+        </header>
 
         {/* ══ DASHBOARD ══ */}
         {tab === "dashboard" && (
-          <div key="dashboard">
-            <PageHeader title="Dashboard" sub="All-Time Overview" />
+          <main key="dashboard" className="rise">
+            <PageHeader title={`Hello, ${userName}`} sub={new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} />
 
-            {/* Metric Cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 14, marginBottom: 28 }}>
-              {[
-                { color: "var(--gold)", grad: "var(--grad-gold)", icon: "⛪", label: "Total Tithe", value: currency(T.tithe), sub: `${salaryEntries.length} entries`, pct: salaryEntries.length ? 100 : 0, pctLabel: "10% of income", delay: "delay-1" },
-                { color: "var(--teal)", grad: "var(--grad-teal)", icon: "💳", label: "Wants Balance", value: currency(T.wantsBalance), sub: `of ${currency(T.wants)} allocated`, pct: Math.max(0, 100 - wPct), pctLabel: `${Math.max(0, 100 - wPct).toFixed(0)}% left`, delay: "delay-2", negative: T.wantsBalance < 0 },
-                { color: "var(--violet)", grad: "var(--grad-violet)", icon: "📈", label: "Total Savings", value: currency(T.savings), sub: `Inv: ${currency(T.savInv)}`, pct: T.savings > 0 ? 100 : 0, pctLabel: "↑ Growing", delay: "delay-3" },
-                { color: "var(--rose)", grad: "var(--grad-rose)", icon: "🧾", label: "Total Spent", value: currency(T.spent), sub: `${expenses.length} expenses`, pct: wPct, pctLabel: `${wPct.toFixed(0)}% of budget`, delay: "delay-4" },
-              ].map(c => <MetricCard key={c.label} {...c} />)}
-            </div>
-
-            {/* Analytics Dashboard */}
-            <div className="anim-fade-up" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 14, marginBottom: 28 }}>
-              <Panel title="Income vs Expenses (Monthly)">
-                <div style={{ width: '100%', height: 250 }}>
-                  <ResponsiveContainer>
-                    <LineChart data={groups.slice(0, 6).reverse().map(g => ({ name: monthKeyLabel(g.key).split(" ")[0], Income: g.entries.reduce((s,e)=>s+e.amount,0), Spent: g.expenses.reduce((s,e)=>s+e.amount,0) }))}>
-                      <XAxis dataKey="name" stroke="var(--text-dim)" fontSize={10} tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} />
-                      <Line type="monotone" dataKey="Income" stroke="var(--gold)" strokeWidth={3} dot={{ r: 4, fill: "var(--bg)", strokeWidth: 2 }} />
-                      <Line type="monotone" dataKey="Spent" stroke="var(--rose)" strokeWidth={3} dot={{ r: 4, fill: "var(--bg)", strokeWidth: 2 }} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </Panel>
-              
-              <Panel title="Expense Breakdown (All Time)">
-                <div style={{ width: '100%', height: 250 }}>
-                  <ResponsiveContainer>
-                    <PieChart>
-                      <Pie data={Object.entries(expenses.reduce((acc, e) => { acc[e.tag] = (acc[e.tag] || 0) + e.amount; return acc; }, {})).map(([name, value]) => ({ name, value }))} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
-                        {Object.entries(expenses.reduce((acc, e) => { acc[e.tag] = (acc[e.tag] || 0) + e.amount; return acc; }, {})).map((entry, index) => {
-                           const colors = ["var(--gold)", "var(--teal)", "var(--violet)", "var(--rose)", "#F97316", "#3B82F6", "#EC4899", "#8B5CF6"];
-                           return <Cell key={`cell-${index}`} fill={colors[index % colors.length]} stroke="var(--bg)" strokeWidth={2} />
-                        })}
-                      </Pie>
-                      <Tooltip contentStyle={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} itemStyle={{ color: "var(--text)" }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </Panel>
-            </div>
-
-            {/* Add Salary Panel */}
-            <div className="anim-card delay-2" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-lg)", padding: 28, marginBottom: 22, position: "relative", zIndex: 20 }}>
-              <div style={{ position: "absolute", top: -100, right: -100, width: 320, height: 320, background: "radial-gradient(circle,rgba(240,192,64,.06) 0%,transparent 65%)", pointerEvents: "none" }} />
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
+            <div className="dash">
+              {/* Hero: spendable balance */}
+              <section className="card card--ink on-ink a-hero" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 28 }}>
                 <div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 6 }}>Record Income</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: -0.3 }}>Add Income Entry</div>
+                  <div className="eyebrow">Available to spend</div>
+                  <Money value={T.wantsBalance} className="money--hero" style={{ marginTop: 6, color: overBudget ? "#ff8a80" : undefined }} />
+                  <div className="card__sub" style={{ marginTop: 4 }}>Wants balance · {currency(T.wants)} allocated</div>
                 </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  {["Salary", "Extra"].map(t => (
-                    <button key={t} className={`ff-tag-btn ${incType === t ? "anim-pop" : ""}`} onClick={() => setIncType(t)} style={{
-                      padding: "7px 16px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                      border: incType === t ? (t === "Extra" ? "1px solid rgba(45,226,213,.4)" : "1px solid rgba(240,192,64,.4)") : "1px solid var(--border-hi)",
-                      background: incType === t ? (t === "Extra" ? "var(--teal-dim)" : "var(--gold-glow)") : "transparent",
-                      color: incType === t ? (t === "Extra" ? "var(--teal)" : "var(--gold)") : "var(--text-dim)",
-                      transition: "all .2s cubic-bezier(0.34, 1.56, 0.64, 1)",
-                    }}>{t}</button>
-                  ))}
-                </div>
-              </div>
 
-              {incType === "Salary" && (
-                <div className="anim-fade-up" style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-                  {["Investment", "Emergency"].map(t => (
-                    <button key={t} className={`ff-tag-btn ${sTag === t ? "anim-pop" : ""}`} onClick={() => setSTag(t)} style={{
-                      padding: "5px 12px", borderRadius: 12, fontSize: 11, fontWeight: 600, cursor: "pointer",
-                      border: sTag === t ? (t === "Investment" ? "1px solid rgba(167,139,250,.4)" : "1px solid rgba(240,192,64,.4)") : "1px solid transparent",
-                      background: sTag === t ? (t === "Investment" ? "var(--violet-dim)" : "var(--gold-glow)") : "rgba(255,255,255,.04)",
-                      color: sTag === t ? (t === "Investment" ? "var(--violet)" : "var(--gold)") : "var(--text-dim)",
-                      transition: "all .2s",
-                    }}>{t}</button>
-                  ))}
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
+                    <span style={{ color: "var(--text-on-ink-2)" }}>Wants budget used</span>
+                    <span className="num">{wPct.toFixed(0)}%</span>
+                  </div>
+                  <div className="meter" role="img" aria-label={`${wPct.toFixed(0)}% of wants budget used`}>
+                    <div className={`meter__fill${overBudget ? " meter__fill--over" : ""}`} style={{ width: `${wPct}%` }} />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-on-ink-2)" }}>
+                    <span className="num" style={{ color: "var(--text-on-ink)", fontWeight: 700 }}>{currency(T.spent)}</span> spent all time
+                  </div>
                 </div>
-              )}
 
-              <div style={{ display: "flex", gap: 10, alignItems: "stretch", flexWrap: "wrap" }}>
-                <div style={{ position: "relative", flex: 1, minWidth: 160 }}>
-                  <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", fontFamily: "var(--font-mono)", fontSize: 20, color: incType === "Extra" ? "var(--teal)" : "var(--gold)", pointerEvents: "none", zIndex: 1, transition: "color .3s" }}>$</span>
-                  <input type="number" inputMode="decimal" placeholder="0.00" value={sAmt} onChange={e => setSAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addSalary()} className="ff-input anim-pop"
-                    style={{ width: "100%", background: "rgba(255,255,255,.04)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-sm)", padding: "15px 14px 15px 42px", fontFamily: "var(--font-mono)", fontSize: 24, fontWeight: 500, color: "var(--text)", outline: "none", transition: "all .25s cubic-bezier(0.34, 1.56, 0.64, 1)" }} />
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                  <button className="quick" onClick={() => incomeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>
+                    <span className="quick__circle"><Icon name="plus" /></span>Income
+                  </button>
+                  <button className="quick" onClick={() => go("expenses")}>
+                    <span className="quick__circle"><Icon name="up" /></span>Expense
+                  </button>
+                  <button className="quick" onClick={() => go("history")}>
+                    <span className="quick__circle"><Icon name="download" /></span>Statement
+                  </button>
                 </div>
-                <FinDateSelector value={sDate} onChange={setSDate} />
-                <GoldButton onClick={addSalary} disabled={!hasPrev} style={{ background: incType === "Extra" ? "var(--grad-teal)" : "var(--grad-gold)" }}>Add Income</GoldButton>
-              </div>
 
-              {hasPrev && (
-                <div className="anim-fade-up" style={{ display: "flex", gap: 20, marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
-                  {(incType === "Extra"
-                    ? [["Extra Wants 100%", pWants, "var(--teal)"], ["New Wants Balance", T.wantsBalance + pWants, "var(--teal)"]]
-                    : [["Tithe 10%", pTithe, "var(--gold)"], ["Wants 45%", pWants, "var(--teal)"], ["Savings 45%", pSavings, "var(--violet)"], ["New Wants Balance", T.wantsBalance + pWants, "var(--teal)"]]
-                  ).map(([lbl, val, col], i) => (
-                    <div key={lbl} className="anim-pop" style={{ animationDelay: `${i * 0.04}s` }}>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 2.5, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 4 }}>{lbl}</div>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 16, fontWeight: 500, color: col }}>{currency(val)}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div className="eyebrow" style={{ marginBottom: 2 }}>Set aside</div>
+                  {[
+                    ["Investments", T.savInv, "trend", T.savings > 0 ? (T.savInv / T.savings) * 100 : 0],
+                    ["Emergency fund", T.savEm, "shield", T.savings > 0 ? (T.savEm / T.savings) * 100 : 0],
+                    ["Tithe given", T.tithe, "heartHand", null],
+                  ].map(([lbl, val, ic, share]) => (
+                    <div key={lbl} className="tile" style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px" }}>
+                      <span className="quick__circle" style={{ width: 36, height: 36 }}><Icon name={ic} size={16} /></span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: "var(--text-on-ink-2)", fontWeight: 600 }}>{lbl}</div>
+                        <Money value={val} className="money--md" />
+                      </div>
+                      {share !== null && <span className="badge num">{share.toFixed(0)}%</span>}
                     </div>
                   ))}
                 </div>
-              )}
-            </div>
+              </section>
 
-            {/* Recent Salaries */}
-            {sortedSalaries.length > 0 && (
-              <Panel title="Recent Income Entries">
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 280, overflowY: "auto" }}>
-                  {sortedSalaries.slice(0, 8).map((e, i) => <SalaryRow key={e.id} entry={e} onDelete={() => delSalary(e.id)} delay={i} />)}
+              {/* Cash flow */}
+              <section className="card a-flow">
+                <div className="card__head">
+                  <div>
+                    <div className="card__title">Cash flow</div>
+                    <div className="legend" style={{ marginTop: 8 }}>
+                      <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--c-income)" }} />Income <b className="num" style={{ color: "var(--text)" }}>{currency(flowIncome)}</b></span>
+                      <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--c-spent)" }} />Spent <b className="num" style={{ color: "var(--text)" }}>{currency(flowSpent)}</b></span>
+                    </div>
+                  </div>
+                  <Segmented options={["6M", "12M", "All"]} value={flowRange} onChange={setFlowRange} label="Cash flow range" />
                 </div>
-              </Panel>
-            )}
-            {salaryEntries.length === 0 && <EmptyState icon="💰" text={"Enter your first salary above to begin.\nData is saved to your private cloud."} />}
-          </div>
+                {flowIncome + flowSpent === 0 ? (
+                  <EmptyState icon="trend" title="No activity in this period" text="Add income or expenses to see your monthly cash flow." />
+                ) : (
+                  <div style={{ width: "100%", height: 260 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={flowSeries} barGap={3} barCategoryGap={flowSeries.length > 12 ? "18%" : "30%"} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+                        <CartesianGrid vertical={false} stroke="var(--divider)" />
+                        <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--text-3)", fontSize: 12, fontWeight: 600 }} interval="preserveStartEnd" minTickGap={8} />
+                        <YAxis tickFormatter={compactINR} tickLine={false} axisLine={false} width={56} tick={{ fill: "var(--text-3)", fontSize: 12 }} />
+                        <Tooltip cursor={{ fill: "var(--surface-2)", radius: 8 }} content={<ChartTooltip />} />
+                        <Bar dataKey="income" name="Income" fill="var(--c-income)" radius={[4, 4, 0, 0]} maxBarSize={20} />
+                        <Bar dataKey="spent" name="Spent" fill="var(--c-spent)" radius={[4, 4, 0, 0]} maxBarSize={20} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </section>
+
+              {/* This month */}
+              <section className="card a-month">
+                <div className="card__head" style={{ marginBottom: 12 }}>
+                  <div>
+                    <div className="card__title">This month</div>
+                    <div className="card__sub">{monthKeyLabel(curKey)}</div>
+                  </div>
+                </div>
+                <div className="list">
+                  {[
+                    ["Income", mIncome, "pos", `${thisMonth.entries.length} ${thisMonth.entries.length === 1 ? "entry" : "entries"}`],
+                    ["Spent", mSpent, null, `${thisMonth.expenses.length} ${thisMonth.expenses.length === 1 ? "expense" : "expenses"}`],
+                    ["Saved", mSaved, null, "45% of salary"],
+                  ].map(([lbl, val, tone, meta]) => (
+                    <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderTop: lbl === "Income" ? 0 : "1px solid var(--divider)", gap: 12 }}>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{lbl}</div>
+                        <div className="stat__meta">{meta}</div>
+                      </div>
+                      <Money value={val} className={`money--lg ${tone || ""}`} />
+                    </div>
+                  ))}
+                </div>
+                <div className="tile" style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+                  {spentDelta === null ? (
+                    <span style={{ color: "var(--text-3)" }}>No spending recorded last month to compare.</span>
+                  ) : (
+                    <>
+                      <span className={`badge ${spentDelta > 0 ? "badge--neg" : "badge--pos"}`}>
+                        <Icon name={spentDelta > 0 ? "up" : "down"} size={12} stroke={2.4} />
+                        <span className="num">{Math.abs(spentDelta).toFixed(0)}%</span>
+                      </span>
+                      <span style={{ color: "var(--text-2)" }}>{spentDelta > 0 ? "more" : "less"} spending than {monthShort(prevKey)} ({currency(lmSpent)})</span>
+                    </>
+                  )}
+                </div>
+              </section>
+
+              {/* Spending breakdown */}
+              <section className="card a-cats">
+                <div className="card__head" style={{ marginBottom: 12 }}>
+                  <div className="card__title">Spending by category</div>
+                  <Segmented options={[["month", "Month"], ["all", "All time"]]} value={catScope} onChange={setCatScope} label="Category period" />
+                </div>
+                <CategoryBreakdown data={catData} />
+              </section>
+
+              {/* Record income */}
+              <section className="card a-income" ref={incomeFormRef}>
+                <div className="card__head">
+                  <div>
+                    <div className="card__title">Record income</div>
+                    <div className="card__sub">{isExtra ? "Extra income goes 100% to your wants balance." : "Salary is split 10% tithe · 45% wants · 45% savings."}</div>
+                  </div>
+                  <Segmented options={["Salary", "Extra"]} value={incType} onChange={setIncType} label="Income type" />
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  <div className="form-row" style={{ alignItems: "flex-end" }}>
+                    <label className="field" style={{ flex: "2 1 220px" }}>
+                      <span className="field__label">Amount</span>
+                      <span className="input-wrap">
+                        <span className="input-prefix input-prefix--lg">₹</span>
+                        <input type="number" inputMode="decimal" placeholder="0.00" value={sAmt} onChange={e => setSAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addSalary()} className="input input--amount" />
+                      </span>
+                    </label>
+                    <div className="field" style={{ flex: "1 1 170px" }}>
+                      <span className="field__label">Date</span>
+                      <FinDateSelector value={sDate} onChange={setSDate} label="Income date" />
+                    </div>
+                  </div>
+
+                  {!isExtra && (
+                    <div className="field">
+                      <span className="field__label">Savings go to</span>
+                      <Segmented options={["Investment", "Emergency"]} value={sTag} onChange={setSTag} label="Savings destination" />
+                    </div>
+                  )}
+
+                  <div className="tile">
+                    <div className="stack" aria-hidden="true">
+                      {isExtra
+                        ? <span style={{ flexGrow: 1, background: "var(--lime-chart)" }} />
+                        : <>
+                          <span style={{ flexGrow: 10, background: "var(--text-3)" }} />
+                          <span style={{ flexGrow: 45, background: "var(--lime-chart)" }} />
+                          <span style={{ flexGrow: 45, background: "var(--ink)" }} />
+                        </>}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 14 }}>
+                      {(isExtra
+                        ? [["Wants · 100%", pWants, "var(--lime-chart)"], ["New wants balance", T.wantsBalance + pWants, null]]
+                        : [["Tithe · 10%", pTithe, "var(--text-3)"], ["Wants · 45%", pWants, "var(--lime-chart)"], ["Savings · 45%", pSavings, "var(--ink)"], ["New wants balance", T.wantsBalance + pWants, null]]
+                      ).map(([lbl, val, col]) => (
+                        <div key={lbl}>
+                          <div className="legend__item eyebrow">{col && <span className="dot dot--sq" style={{ background: col }} />}{lbl}</div>
+                          <Money value={hasPrev || !col ? val : 0} className="money--md" style={{ marginTop: 2, color: hasPrev ? undefined : "var(--text-3)" }} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button className="btn btn--primary" onClick={addSalary} disabled={!hasPrev} style={{ alignSelf: "flex-start" }}>
+                    <Icon name="plus" size={16} /> Add {isExtra ? "extra income" : "salary"}
+                  </button>
+                </div>
+              </section>
+
+              {/* Recent activity */}
+              <section className="card a-activity">
+                <div className="card__head" style={{ marginBottom: 12 }}>
+                  <div className="card__title">Recent activity</div>
+                  {activity.length > 0 && <button className="btn btn--sm btn--secondary" onClick={() => go("history")}>View all</button>}
+                </div>
+                {activity.length === 0 ? (
+                  <EmptyState icon="clock" title="Nothing here yet" text="Record your first salary to get started. Your data is saved to your private cloud." />
+                ) : (
+                  <div className="list">
+                    {activity.map(day => (
+                      <div key={day.date}>
+                        <div className="list__group">{dayLabel(day.date)}</div>
+                        {day.items.map(it => it.kind === "income"
+                          ? <TxRow key={it.id} {...salaryRowProps(it.entry, () => delSalary(it.rawId))} />
+                          : <TxRow key={it.id} {...expenseRowProps(it.entry, () => delExpense(it.rawId), false)} />)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          </main>
         )}
 
         {/* ══ EXPENSES ══ */}
         {tab === "expenses" && (
-          <div key="expenses">
-            <PageHeader title="Expenses" sub="Spending Overview" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(290px,1fr))", gap: 18, marginBottom: 8 }}>
-              <Panel title="Add Expense" style={{ zIndex: 20 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <FInput placeholder="Expense name…" value={eName} onChange={e => setEName(e.target.value)} />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <FInput type="number" inputMode="decimal" placeholder="Amount" value={eAmt} onChange={e => setEAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addExpense()} />
-                    <FinDateSelector value={eDate} onChange={setEDate} />
-                  </div>
-                  <select value={eTag} onChange={e => setETag(e.target.value)} className="ff-input"
-                    style={{ background: "rgba(255,255,255,.04)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-sm)", padding: "11px 14px", fontFamily: "var(--font-ui)", fontSize: 14, color: "var(--text)", outline: "none", cursor: "pointer", transition: "all .25s" }}>
-                    {["General", "Food", "Transport", "Bills", "Health", "Entertainment", "Shopping", "Other"].map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                  <TealButton onClick={addExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0} className="ff-teal-btn">+ Add Expense</TealButton>
-                  {T.wantsBalance < 0 && <div style={{ fontSize: 11, color: "var(--rose)", fontFamily: "var(--font-mono)", marginTop: 2 }}>⚠ Over budget by {currency(Math.abs(T.wantsBalance))}</div>}
-                </div>
-              </Panel>
+          <main key="expenses" className="rise">
+            <PageHeader title="Expenses" sub="Everything you've spent from your wants balance" />
 
-              <Panel title="Transactions">
-                {sortedExpenses.length === 0 ? <EmptyState icon="💸" text="No expenses recorded yet" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 7, maxHeight: 460, overflowY: "auto" }}>
-                    {sortedExpenses.map((e, i) => (
-                      <div key={e.id} className="ff-row" style={{ display: "flex", alignItems: "center", background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "11px 14px", transition: "all .2s", gap: 10 }}>
-                        <div style={{ width: 32, height: 32, borderRadius: 8, background: "var(--rose-dim)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0 }}>
-                          {tagIcon(e.tag)}
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{e.name}</div>
-                          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{e.tag} · {fmtDate(e.date)}</div>
-                        </div>
-                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: "var(--rose)", flexShrink: 0 }}>-{currency(e.amount)}</span>
-                        <button className="ff-del" onClick={() => delExpense(e.id)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 11, padding: "5px 8px", transition: "all .2s", flexShrink: 0 }}>✕</button>
-                      </div>
-                    ))}
+            <section className="card card--flush" style={{ marginBottom: 16 }}>
+              <div className="stat-strip">
+                <Stat label="Spent this month" value={mSpent} meta={monthKeyLabel(curKey)} />
+                <Stat label="Spent all time" value={T.spent} meta={`${expenses.length} expenses`} />
+                <Stat label="Wants balance" value={T.wantsBalance} tone={overBudget ? "neg" : undefined} meta={overBudget ? "Over budget" : `${(100 - wPct).toFixed(0)}% of allocation left`} />
+              </div>
+            </section>
+
+            <div className="split">
+              <section className="card">
+                <div className="card__head"><div className="card__title">Add expense</div></div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <label className="field">
+                    <span className="field__label">Description</span>
+                    <input className="input" placeholder="e.g. Groceries" value={eName} onChange={e => setEName(e.target.value)} />
+                  </label>
+                  <div className="form-row">
+                    <label className="field">
+                      <span className="field__label">Amount</span>
+                      <span className="input-wrap">
+                        <span className="input-prefix">₹</span>
+                        <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={eAmt} onChange={e => setEAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addExpense()} />
+                      </span>
+                    </label>
+                    <div className="field">
+                      <span className="field__label">Date</span>
+                      <FinDateSelector value={eDate} onChange={setEDate} label="Expense date" />
+                    </div>
                   </div>
-                )}
-              </Panel>
+                  <div className="field">
+                    <span className="field__label">Category</span>
+                    <div className="chip-grid" role="group" aria-label="Category">
+                      {CATEGORIES.map(c => (
+                        <button key={c.id} type="button" className="chip" aria-pressed={eTag === c.id} onClick={() => setETag(c.id)}>
+                          <Icon name={c.icon} size={18} />
+                          <span>{c.id}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <button className="btn btn--primary btn--block" onClick={addExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0}>
+                    <Icon name="plus" size={16} /> Add expense
+                  </button>
+                  {overBudget && (
+                    <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Over budget by {currency(Math.abs(T.wantsBalance))}</span></div>
+                  )}
+                </div>
+              </section>
+
+              <section className="card">
+                <div className="card__head" style={{ marginBottom: 14 }}>
+                  <div>
+                    <div className="card__title">Transactions</div>
+                    <div className="card__sub">{expenseView.list.length} shown · <span className="num">{currency(expenseView.total)}</span></div>
+                  </div>
+                </div>
+                <div className="toolbar" style={{ marginBottom: 12 }}>
+                  <span className="input-wrap grow">
+                    <span className="input-icon"><Icon name="search" size={16} /></span>
+                    <input className="input" placeholder="Search expenses" value={eQuery} onChange={e => { setEQuery(e.target.value); setELimit(30); }} aria-label="Search expenses" />
+                  </span>
+                  <select className="select" value={eFilter} onChange={e => { setEFilter(e.target.value); setELimit(30); }} aria-label="Filter by category">
+                    <option value="All">All categories</option>
+                    {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.id}</option>)}
+                  </select>
+                  <select className="select" value={eSort} onChange={e => setESort(e.target.value)} aria-label="Sort">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="highest">Highest amount</option>
+                    <option value="lowest">Lowest amount</option>
+                  </select>
+                </div>
+
+                {expenses.length === 0 ? <EmptyState icon="receipt" title="No expenses yet" text="Expenses you add will appear here, grouped by day." /> :
+                  expenseView.list.length === 0 ? <EmptyState icon="search" title="No matches" text="Try a different search or category." /> : (
+                    <div className="list">
+                      {(eSort === "newest" || eSort === "oldest")
+                        ? groupByDay(expenseView.list.slice(0, eLimit)).map(day => (
+                          <div key={day.date}>
+                            <div className="list__group" style={{ display: "flex", justifyContent: "space-between" }}>
+                              <span>{dayLabel(day.date)}</span>
+                              <span className="num">{currency(sum(day.items, x => x.amount))}</span>
+                            </div>
+                            {day.items.map(e => <TxRow key={e.id} {...expenseRowProps(e, () => delExpense(e.id), false)} />)}
+                          </div>
+                        ))
+                        : expenseView.list.slice(0, eLimit).map(e => <TxRow key={e.id} {...expenseRowProps(e, () => delExpense(e.id))} />)}
+                      {expenseView.list.length > eLimit && (
+                        <button className="btn btn--secondary btn--sm" style={{ alignSelf: "center", marginTop: 12 }} onClick={() => setELimit(l => l + 30)}>
+                          Show more ({expenseView.list.length - eLimit} left)
+                        </button>
+                      )}
+                    </div>
+                  )}
+              </section>
             </div>
-          </div>
+          </main>
         )}
 
         {/* ══ SAVINGS ══ */}
         {tab === "savings" && (
-          <div key="savings">
-            <PageHeader title="Savings" sub="Wealth Building" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14, marginBottom: 24 }}>
-              {[
-                { color: "var(--teal)", grad: "var(--grad-teal)", icon: "💎", label: "Total Savings", value: currency(T.savings), sub: "Accumulated", pct: 100, pctLabel: "Private Fund", delay: "delay-1" },
-                { color: "var(--violet)", grad: "var(--grad-violet)", icon: "📊", label: "Investments", value: currency(T.savInv), sub: "Long-term", pct: T.savings > 0 ? (T.savInv / T.savings) * 100 : 0, pctLabel: "Growth", delay: "delay-2" },
-                { color: "var(--gold)", grad: "var(--grad-gold)", icon: "🛡", label: "Emergency Fund", value: currency(T.savEm), sub: "Safety Net", pct: T.savings > 0 ? (T.savEm / T.savings) * 100 : 0, pctLabel: "Stable", delay: "delay-3" },
-              ].map(c => <MetricCard key={c.label} {...c} />)}
-            </div>
-            <Panel title="Savings Contributions">
-              {sortedSalaries.length === 0 ? <EmptyState icon="🌱" text="No savings yet." /> : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 7, maxHeight: 500, overflowY: "auto" }}>
-                  {sortedSalaries.map(e => (
-                    <div key={e.id} className="ff-row" style={{ display: "flex", alignItems: "center", background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", transition: "all .2s", gap: 12 }}>
-                      <div style={{ width: 36, height: 36, borderRadius: 9, background: e.savingsTag === "Investment" ? "var(--violet-dim)" : "var(--gold-glow)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 }}>
-                        {e.savingsTag === "Investment" ? "📊" : "🛡"}
+          <main key="savings" className="rise">
+            <PageHeader title="Savings" sub="45% of every salary, set aside automatically" />
+            <div className="split" style={{ marginBottom: 16 }}>
+              <section className="card card--ink" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+                <div>
+                  <div className="eyebrow">Total savings</div>
+                  <Money value={T.savings} className="money--hero" style={{ marginTop: 6 }} />
+                </div>
+                <div>
+                  <div className="stack" style={{ height: 12 }} role="img" aria-label="Savings split between investments and emergency fund">
+                    {T.savings > 0
+                      ? <>
+                        <span style={{ flexGrow: T.savInv, background: "#ffffff" }} />
+                        <span style={{ flexGrow: T.savEm, background: "var(--lime)" }} />
+                      </>
+                      : <span style={{ flexGrow: 1, background: "var(--ink-3)" }} />}
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[["Investments", T.savInv, "#ffffff", "trend"], ["Emergency fund", T.savEm, "var(--lime)", "shield"]].map(([lbl, val, col, ic]) => (
+                    <div key={lbl} className="tile">
+                      <div className="legend__item" style={{ fontSize: 12, fontWeight: 600, color: "var(--text-on-ink-2)" }}><span className="dot dot--sq" style={{ background: col }} />{lbl}</div>
+                      <Money value={val} className="money--lg" style={{ marginTop: 6 }} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 12, color: "var(--text-on-ink-2)" }}>
+                        <Icon name={ic} size={13} /><span className="num">{T.savings > 0 ? ((val / T.savings) * 100).toFixed(0) : 0}% of savings</span>
                       </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtDate(e.date)}</div>
-                        <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{e.savingsTag}</div>
-                      </div>
-                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: e.savingsTag === "Investment" ? "var(--violet)" : "var(--gold)", fontWeight: 600 }}>+{currency(e.savingsAlloc)}</span>
                     </div>
                   ))}
                 </div>
+              </section>
+
+              <section className="card">
+                <div className="card__head">
+                  <div>
+                    <div className="card__title">Monthly contributions</div>
+                    <div className="card__sub">Last 12 months · average <b className="num" style={{ color: "var(--text)" }}>{currency(savings12 / 12)}</b> per month</div>
+                  </div>
+                  <div className="legend">
+                    <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--ink)" }} />Saved</span>
+                    <span className="legend__item"><span className="dot dot--sq" style={{ background: "var(--lime-chart)" }} />This month</span>
+                  </div>
+                </div>
+                {savings12 === 0 ? <EmptyState icon="wallet" title="No contributions in the last year" text="Savings appear here when you record a salary." /> : (
+                  <div style={{ width: "100%", height: 240 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={savingsSeries} barCategoryGap="28%" margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+                        <CartesianGrid vertical={false} stroke="var(--divider)" />
+                        <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--text-3)", fontSize: 12, fontWeight: 600 }} interval="preserveStartEnd" minTickGap={4} />
+                        <YAxis tickFormatter={compactINR} tickLine={false} axisLine={false} width={56} tick={{ fill: "var(--text-3)", fontSize: 12 }} />
+                        <Tooltip cursor={{ fill: "var(--surface-2)", radius: 8 }} content={<ChartTooltip />} />
+                        <Bar dataKey="saved" name="Saved" radius={[4, 4, 0, 0]} maxBarSize={28}>
+                          {savingsSeries.map(d => <Cell key={d.key} fill={d.current ? "var(--lime-chart)" : "var(--ink)"} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <section className="card">
+              <div className="card__head" style={{ marginBottom: 12 }}><div className="card__title">Contributions</div></div>
+              {sortedSalaries.filter(e => e.savingsAlloc > 0).length === 0 ? <EmptyState icon="wallet" title="No savings yet" text="Record a salary and 45% will be saved here." /> : (
+                <div className="list">
+                  {sortedSalaries.filter(e => e.savingsAlloc > 0).map(e => (
+                    <TxRow key={e.id} icon={e.savingsTag === "Investment" ? "trend" : "shield"} iconClass={e.savingsTag === "Investment" ? "row__icon--ink" : "row__icon--lime"}
+                      title={e.savingsTag === "Investment" ? "Investments" : "Emergency fund"} meta={`${fmtDate(e.date)} · from ${currency(e.amount)} salary`} amount={e.savingsAlloc} positive />
+                  ))}
+                </div>
               )}
-            </Panel>
-          </div>
+            </section>
+          </main>
         )}
 
         {/* ══ GOALS ══ */}
         {tab === "goals" && (
-          <div key="goals">
-            <PageHeader title="Goals" sub="Custom Financial Targets" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(290px,1fr))", gap: 18, marginBottom: 8 }}>
-              <Panel title="Create Goal" style={{ zIndex: 20 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <FInput placeholder="Goal name (e.g. New Car)…" value={gName} onChange={e => setGName(e.target.value)} />
-                  <FInput type="number" inputMode="decimal" placeholder="Target Amount" value={gTarget} onChange={e => setGTarget(e.target.value)} />
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {["var(--gold)", "var(--teal)", "var(--violet)", "var(--rose)", "#3B82F6", "#EC4899"].map(c => (
-                      <button key={c} onClick={() => setGColor(c)} style={{ width: 24, height: 24, borderRadius: '50%', background: c, border: gColor === c ? '2px solid white' : '2px solid transparent', cursor: "pointer" }} />
-                    ))}
-                  </div>
-                  <GoldButton onClick={addGoal} disabled={!gName.trim() || !gTarget || parseFloat(gTarget) <= 0}>+ Create Goal</GoldButton>
+          <main key="goals" className="rise">
+            <PageHeader title="Goals" sub="Targets you're saving toward" />
+            {goals.length > 0 && (
+              <section className="card card--flush" style={{ marginBottom: 16 }}>
+                <div className="stat-strip">
+                  <Stat label="Saved toward goals" value={sum(goals, g => g.current_amount)} meta={`${goals.length} ${goals.length === 1 ? "goal" : "goals"}`} />
+                  <Stat label="Total targets" value={sum(goals, g => g.target_amount)} meta={`${goals.filter(g => g.current_amount >= g.target_amount).length} completed`} />
+                  <Stat label="Still to save" value={sum(goals, g => Math.max(0, g.target_amount - g.current_amount))} meta="Across all goals" />
                 </div>
-              </Panel>
+              </section>
+            )}
+            <div className="split">
+              <section className="card">
+                <div className="card__head"><div className="card__title">New goal</div></div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <label className="field">
+                    <span className="field__label">Name</span>
+                    <input className="input" placeholder="e.g. New car" value={gName} onChange={e => setGName(e.target.value)} />
+                  </label>
+                  <label className="field">
+                    <span className="field__label">Target amount</span>
+                    <span className="input-wrap">
+                      <span className="input-prefix">₹</span>
+                      <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={gTarget} onChange={e => setGTarget(e.target.value)} onKeyDown={e => e.key === "Enter" && addGoal()} />
+                    </span>
+                  </label>
+                  <div className="field">
+                    <span className="field__label">Colour</span>
+                    <div style={{ display: "flex", gap: 10, padding: "4px 2px" }} role="group" aria-label="Goal colour">
+                      {GOAL_COLORS.map(c => <button key={c} type="button" className="swatch" aria-pressed={gColor === c} aria-label={c.replace("var(--c-", "").replace(")", "")} onClick={() => setGColor(c)} style={{ background: c }} />)}
+                    </div>
+                  </div>
+                  <button className="btn btn--primary btn--block" onClick={addGoal} disabled={!gName.trim() || !gTarget || parseFloat(gTarget) <= 0}>
+                    <Icon name="plus" size={16} /> Create goal
+                  </button>
+                </div>
+              </section>
 
-              <Panel title="Your Goals">
-                {goals.length === 0 ? <EmptyState icon="🎯" text="No goals set yet" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <section>
+                {goals.length === 0 ? (
+                  <div className="card"><EmptyState icon="target" title="No goals yet" text="Create a goal to track progress toward something you're saving for." /></div>
+                ) : (
+                  <div className="cards-2">
                     {goals.map(g => {
                       const pct = Math.min(100, (g.current_amount / g.target_amount) * 100);
+                      const done = g.current_amount >= g.target_amount;
+                      const amt = fundAmts[g.id] || "";
+                      const submit = () => { fundGoal(g, amt); setFundAmts(p => ({ ...p, [g.id]: "" })); };
                       return (
-                        <div key={g.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px", position: "relative", overflow: "hidden" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                            <div style={{ fontSize: 15, fontWeight: 700 }}>{g.name}</div>
-                            <button className="ff-del" onClick={() => delGoal(g.id)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 11 }}>✕</button>
+                        <article key={g.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <span className="row__icon" style={{ color: g.color || "var(--ink)", borderRadius: 12 }}><Icon name="target" size={20} /></span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="row__title" style={{ fontSize: 16 }}>{g.name}</div>
+                              {done ? <span className="badge badge--pos" style={{ marginTop: 2 }}><Icon name="check" size={12} stroke={2.4} />Completed</span>
+                                : <div className="row__meta">{currency(g.target_amount - g.current_amount)} to go</div>}
+                            </div>
+                            <button className="icon-btn icon-btn--danger" onClick={() => delGoal(g.id)} aria-label={`Delete goal ${g.name}`} title="Delete goal"><Icon name="trash" size={16} /></button>
                           </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
-                            <span>{currency(g.current_amount)}</span>
-                            <span>{currency(g.target_amount)}</span>
+                          <div className="tile">
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                              <Money value={g.current_amount} className="money--md" />
+                              <span className="num" style={{ color: "var(--text-3)", fontSize: 13 }}>{currency(g.target_amount)}</span>
+                            </div>
+                            <div className="progress" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label={`${g.name} progress`}>
+                              <div className="progress__fill" style={{ width: `${pct}%`, background: g.color || "var(--ink)" }} />
+                            </div>
+                            <div style={{ textAlign: "right", fontSize: 12, fontWeight: 700, marginTop: 6 }} className="num">{pct.toFixed(0)}%</div>
                           </div>
-                          <div style={{ height: 6, background: "rgba(255,255,255,.06)", borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
-                            <div style={{ height: "100%", background: g.color || "var(--gold)", width: `${pct}%`, borderRadius: 3, transition: "width .5s ease" }} />
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <span className="input-wrap" style={{ flex: 1 }}>
+                              <span className="input-prefix">₹</span>
+                              <input className="input num" style={{ height: 40 }} type="number" inputMode="decimal" placeholder="Add funds" value={amt}
+                                onChange={e => setFundAmts(p => ({ ...p, [g.id]: e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} aria-label={`Amount to add to ${g.name}`} />
+                            </span>
+                            <button className="btn btn--accent btn--sm" style={{ height: 40 }} onClick={submit} disabled={!(parseFloat(amt) > 0)}>Add</button>
                           </div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <FInput type="number" placeholder="Amt" id={`fund-${g.id}`} style={{ padding: "6px 10px", fontSize: 12 }} />
-                            <TealButton onClick={() => {
-                              const input = document.getElementById(`fund-${g.id}`);
-                              fundGoal(g, input.value);
-                              input.value = "";
-                            }} style={{ padding: "6px 12px", fontSize: 11 }}>Fund</TealButton>
-                          </div>
-                        </div>
-                      )
+                        </article>
+                      );
                     })}
                   </div>
                 )}
-              </Panel>
+              </section>
             </div>
-          </div>
+          </main>
         )}
 
         {/* ══ LENDING ══ */}
         {tab === "lending" && (
-          <div key="lending">
-            <PageHeader title="Lending" sub="Track money lent to friends & family" />
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(290px,1fr))", gap: 18, marginBottom: 8 }}>
-              
-              {/* New Loan Panel */}
-              <Panel title="New Loan" style={{ zIndex: 20 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <FInput placeholder="Person's Name…" value={lName} onChange={e => setLName(e.target.value)} />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <FInput type="number" inputMode="decimal" placeholder="Amount" value={lAmt} onChange={e => setLAmt(e.target.value)} style={{ flex: 1 }} />
-                    <FinDateSelector value={lDate} onChange={setLDate} />
+          <main key="lending" className="rise">
+            <PageHeader title="Lending" sub="Money lent to friends & family" />
+
+            <section className="card card--flush" style={{ marginBottom: 16 }}>
+              <div className="stat-strip">
+                <Stat label="Outstanding" value={sum(activeLoans, l => l.amount - (l.repaid_amount || 0))} meta={`${activeLoans.length} active ${activeLoans.length === 1 ? "loan" : "loans"}`} />
+                <Stat label="Repaid to date" value={sum(loans, l => l.repaid_amount || 0)} tone="pos" meta={`${repaidLoans.length} fully repaid`} />
+                <Stat label="Total lent" value={sum(loans, l => l.amount)} meta="All loans on record" />
+              </div>
+            </section>
+
+            <div className="split">
+              <div className="stack-v">
+                <section className="card">
+                  <div className="card__head"><div className="card__title">New loan</div></div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    <label className="field">
+                      <span className="field__label">Person</span>
+                      <input className="input" placeholder="Name" value={lName} onChange={e => setLName(e.target.value)} />
+                    </label>
+                    <div className="form-row">
+                      <label className="field">
+                        <span className="field__label">Amount</span>
+                        <span className="input-wrap">
+                          <span className="input-prefix">₹</span>
+                          <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={lAmt} onChange={e => setLAmt(e.target.value)} />
+                        </span>
+                      </label>
+                      <div className="field">
+                        <span className="field__label">Date</span>
+                        <FinDateSelector value={lDate} onChange={setLDate} label="Loan date" />
+                      </div>
+                    </div>
+                    <label className="field">
+                      <span className="field__label">Note <span style={{ color: "var(--text-3)", fontWeight: 500 }}>(optional)</span></span>
+                      <input className="input" placeholder="What was it for?" value={lNote} onChange={e => setLNote(e.target.value)} />
+                    </label>
+                    <button className="btn btn--primary btn--block" onClick={addLoan} disabled={!lName.trim() || !lAmt || parseFloat(lAmt) <= 0}>
+                      <Icon name="plus" size={16} /> Record loan
+                    </button>
                   </div>
-                  <FInput placeholder="Note (Optional)…" value={lNote} onChange={e => setLNote(e.target.value)} />
-                  <GoldButton onClick={addLoan} disabled={!lName.trim() || !lAmt || parseFloat(lAmt) <= 0}>+ Lend Money</GoldButton>
-                </div>
-              </Panel>
+                </section>
 
-              {/* Active Loans Panel */}
-              <Panel title="Active Loans">
-                {loans.filter(l => l.status === 'pending').length === 0 ? <EmptyState icon="🤝" text="No active loans" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {loans.filter(l => l.status === 'pending').map(l => (
-                      <div key={l.id} className="anim-card" style={{ background: "rgba(255,255,255,.026)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px", position: "relative" }}>
-                        
-                        <button onClick={() => delLoan(l.id)} className="ff-del" style={{ position: "absolute", top: 12, right: 12, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 12 }}>✕</button>
+                <section className="card">
+                  <div className="card__head" style={{ marginBottom: 12 }}><div className="card__title">Repaid</div></div>
+                  {repaidLoans.length === 0 ? <EmptyState icon="check" title="No repaid loans yet" text="Loans move here once they're paid back in full." /> : (
+                    <div className="list">
+                      {repaidLoans.map(l => (
+                        <TxRow key={l.id} icon="check" iconClass="row__icon--lime" title={l.name} meta={`Lent ${fmtDate(l.date)}`} amount={l.amount} amountClass="pos" plain
+                          onDelete={() => delLoan(l.id)} deleteLabel={`Delete loan record for ${l.name}`} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
 
-                        <div style={{ marginBottom: 12, paddingRight: 20 }}>
-                           <div style={{ fontSize: 16, fontWeight: 700 }}>{l.name}</div>
-                           {l.note && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>{l.note}</div>}
-                           <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 4 }}>{fmtDate(l.date)}</div>
-                        </div>
-
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontFamily: "var(--font-mono)", marginBottom: 6 }}>
-                          <span style={{ color: "var(--text-dim)" }}>Total: {currency(l.amount)}</span>
-                          <span style={{ color: "var(--rose)", fontWeight: 600 }}>Left: {currency(l.amount - (l.repaid_amount || 0))}</span>
-                        </div>
-                        
-                        {/* Progress Bar */}
-                        <div style={{ height: 4, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden", marginBottom: 16 }}>
-                           <div style={{ height: "100%", background: "var(--teal)", width: `${Math.min(100, ((l.repaid_amount || 0) / l.amount) * 100)}%`, borderRadius: 2, transition: "width .3s ease" }} />
-                        </div>
-
-                        {/* Action Row */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <FInput type="number" placeholder="Amount" id={`repay-${l.id}`} style={{ padding: "8px 12px", fontSize: 13, flex: 1 }} />
-                            <TealButton onClick={() => {
-                              const input = document.getElementById(`repay-${l.id}`);
-                              repayLoan(l.id, input.value);
-                              input.value = "";
-                            }} style={{ padding: "8px 16px", fontSize: 12 }}>Repay</TealButton>
+              <section>
+                {activeLoans.length === 0 ? (
+                  <div className="card"><EmptyState icon="swap" title="No active loans" text="Record money you've lent and track repayments as they come in." /></div>
+                ) : (
+                  <div className="cards-2">
+                    {activeLoans.map(l => {
+                      const repaid = l.repaid_amount || 0;
+                      const pct = Math.min(100, (repaid / l.amount) * 100);
+                      const amt = repayAmts[l.id] || "";
+                      const submit = () => { repayLoan(l.id, amt); setRepayAmts(p => ({ ...p, [l.id]: "" })); };
+                      return (
+                        <article key={l.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                            <span className="avatar" style={{ width: 40, height: 40, fontSize: 15 }}>{l.name.charAt(0)}</span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="row__title" style={{ fontSize: 16 }}>{l.name}</div>
+                              <div className="row__meta">{fmtDate(l.date)}{l.note ? ` · ${l.note}` : ""}</div>
+                            </div>
+                            <button className="icon-btn icon-btn--danger" onClick={() => delLoan(l.id)} aria-label={`Delete loan to ${l.name}`} title="Delete loan"><Icon name="trash" size={16} /></button>
                           </div>
-                          <button onClick={() => markLoanRepaid(l.id)} style={{ background: "transparent", border: "1px solid var(--teal)", color: "var(--teal)", padding: "6px 0", borderRadius: "var(--radius-sm)", fontSize: 11, cursor: "pointer", width: "100%", transition: "all .2s" }}>✓ Mark Fully Repaid</button>
-                        </div>
-                      </div>
-                    ))}
+                          <div className="tile">
+                            <div className="eyebrow">Still owed</div>
+                            <Money value={l.amount - repaid} className="money--lg" style={{ marginTop: 2 }} />
+                            <div className="progress" style={{ marginTop: 12 }} role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label={`${l.name} repayment progress`}>
+                              <div className="progress__fill" style={{ width: `${pct}%`, background: "var(--ink)" }} />
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6, color: "var(--text-3)", fontWeight: 600 }} className="num">
+                              <span>{currency(repaid)} repaid</span><span>of {currency(l.amount)}</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <span className="input-wrap" style={{ flex: 1 }}>
+                              <span className="input-prefix">₹</span>
+                              <input className="input num" style={{ height: 40 }} type="number" inputMode="decimal" placeholder="Repayment" value={amt}
+                                onChange={e => setRepayAmts(p => ({ ...p, [l.id]: e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} aria-label={`Repayment from ${l.name}`} />
+                            </span>
+                            <button className="btn btn--accent btn--sm" style={{ height: 40 }} onClick={submit} disabled={!(parseFloat(amt) > 0)}>Repay</button>
+                          </div>
+                          <button className="btn btn--outline btn--sm btn--block" onClick={() => markLoanRepaid(l.id)}><Icon name="check" size={15} /> Mark fully repaid</button>
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
-              </Panel>
-
-              {/* Repaid Loans Panel */}
-              <Panel title="Repaid History">
-                {loans.filter(l => l.status === 'repaid').length === 0 ? <EmptyState icon="✅" text="No repaid loans yet" /> : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
-                    {loans.filter(l => l.status === 'repaid').map(l => (
-                      <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,.01)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", opacity: 0.7 }}>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 600, textDecoration: "line-through" }}>{l.name}</div>
-                          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{fmtDate(l.date)}</div>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                          <span style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--teal)" }}>{currency(l.amount)}</span>
-                          <button onClick={() => delLoan(l.id)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 10 }}>✕</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Panel>
+              </section>
             </div>
-          </div>
+          </main>
         )}
 
         {/* ══ HISTORY ══ */}
         {tab === "history" && (
-          <div key="history">
-            <PageHeader title="History" sub="Monthly Breakdown" />
+          <main key="history" className="rise">
+            <PageHeader title="History" sub="Month-by-month breakdown and statements" />
 
-            {/* Export Panel */}
-            <Panel title="Export Statement" style={{ marginBottom: 24, zIndex: 20 }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div style={{ display: "flex", gap: 6 }}>
-                  {["Month", "Date Range"].map(t => (
-                    <button key={t} className={`ff-tag-btn ${expType === t ? "anim-pop" : ""}`} onClick={() => setExpType(t)} style={{
-                      padding: "7px 16px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                      border: expType === t ? "1px solid rgba(240,192,64,.4)" : "1px solid var(--border-hi)",
-                      background: expType === t ? "var(--gold-glow)" : "transparent",
-                      color: expType === t ? "var(--gold)" : "var(--text-dim)",
-                      transition: "all .2s cubic-bezier(0.34, 1.56, 0.64, 1)",
-                    }}>{t}</button>
-                  ))}
+            <section className="card" style={{ marginBottom: 16 }}>
+              <div className="card__head" style={{ marginBottom: 16 }}>
+                <div>
+                  <div className="card__title">Download statement</div>
+                  <div className="card__sub">Income and expenses for a month or a custom range.</div>
                 </div>
-                
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  {expType === "Month" ? (
-                    <select value={expMonth} onChange={e => setExpMonth(e.target.value)} className="ff-input"
-                      style={{ background: "rgba(255,255,255,.04)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-sm)", padding: "11px 14px", fontFamily: "var(--font-ui)", fontSize: 14, color: "var(--text)", outline: "none", cursor: "pointer", transition: "all .25s", flex: 1, minWidth: 140 }}>
+                <Segmented options={["Month", "Date Range"]} value={expType} onChange={setExpType} label="Statement period" />
+              </div>
+              <div className="toolbar" style={{ alignItems: "flex-end" }}>
+                {expType === "Month" ? (
+                  <label className="field grow" style={{ flex: "1 1 220px" }}>
+                    <span className="field__label">Month</span>
+                    <select className="select" value={expMonth} onChange={e => setExpMonth(e.target.value)}>
                       {[...new Set(groups.map(g => g.key))].map(k => <option key={k} value={k}>{monthKeyLabel(k)}</option>)}
                       {groups.length === 0 && <option value={expMonth}>{monthKeyLabel(expMonth)}</option>}
                     </select>
-                  ) : (
-                    <div style={{ display: "flex", gap: 10, flex: 1, minWidth: 280, flexWrap: "wrap" }}>
-                      <FinDateSelector value={expStart} onChange={setExpStart} />
-                      <span style={{ color: "var(--text-dim)", alignSelf: "center", fontFamily: "var(--font-mono)", fontSize: 12 }}>TO</span>
-                      <FinDateSelector value={expEnd} onChange={setExpEnd} />
-                    </div>
-                  )}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <GoldButton onClick={() => downloadStatement('csv')}>Download CSV</GoldButton>
-                    <TealButton onClick={() => downloadStatement('pdf')} className="ff-teal-btn">Download PDF</TealButton>
+                  </label>
+                ) : (
+                  <div className="form-row" style={{ flex: "1 1 340px" }}>
+                    <div className="field"><span className="field__label">From</span><FinDateSelector value={expStart} onChange={setExpStart} label="Start date" /></div>
+                    <div className="field"><span className="field__label">To</span><FinDateSelector value={expEnd} onChange={setExpEnd} label="End date" /></div>
                   </div>
+                )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button className="btn btn--primary" onClick={() => downloadStatement('csv')}><Icon name="download" size={16} /> CSV</button>
+                  <button className="btn btn--secondary" onClick={() => downloadStatement('pdf')}><Icon name="download" size={16} /> PDF</button>
                 </div>
               </div>
-            </Panel>
+            </section>
 
-            {groups.length === 0 && <EmptyState icon="📅" text="No history yet." />}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {groups.map((group, gi) => {
-                const gIncome = group.entries.reduce((s, e) => s + e.amount, 0);
-                const gSpent = group.expenses.reduce((s, e) => s + e.amount, 0);
-                const gSaved = group.entries.reduce((s, e) => s + e.savingsAlloc, 0);
-                const isOpen = openMonth === group.key;
-                return (
-                  <div key={group.key} className="anim-card" style={{ animationDelay: `${gi * 0.04}s`, background: "var(--surface)", border: `1px solid ${isOpen ? "var(--border-hi)" : "var(--border)"}`, borderRadius: "var(--radius)", overflow: "hidden", transition: "border-color .2s" }}>
-                    <div className="ff-month" onClick={() => setOpenMonth(isOpen ? null : group.key)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 22px", cursor: "pointer", transition: "background .18s", gap: 12 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                        <div style={{ width: 40, height: 40, borderRadius: 10, background: "linear-gradient(135deg,rgba(240,192,64,.15),rgba(240,192,64,.06))", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--gold)", fontWeight: 600, flexShrink: 0 }}>
-                          {group.key.split("-")[1]}
+            {groups.length === 0 ? <div className="card"><EmptyState icon="clock" title="No history yet" text="Your monthly summaries will build up here as you add income and expenses." /></div> : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {groups.map(group => {
+                  const gIncome = group.entries.reduce((s, e) => s + e.amount, 0);
+                  const gSpent = group.expenses.reduce((s, e) => s + e.amount, 0);
+                  const gSaved = group.entries.reduce((s, e) => s + e.savingsAlloc, 0);
+                  const isOpen = openMonth === group.key;
+                  const [yy] = group.key.split("-");
+                  return (
+                    <div key={group.key} className="month" data-open={isOpen}>
+                      <button className="month__head" onClick={() => setOpenMonth(isOpen ? null : group.key)} aria-expanded={isOpen}>
+                        <span className="month__tile"><b>{monthShort(group.key)}</b><small>{yy}</small></span>
+                        <span className="month__name" style={{ minWidth: 0 }}>
+                          <span style={{ display: "block", fontSize: 15, fontWeight: 700 }}>{monthKeyLabel(group.key)}</span>
+                          <span className="row__meta" style={{ display: "block" }}>{group.entries.length} income · {group.expenses.length} expenses</span>
+                        </span>
+                        <span className="month__figs">
+                          {[["Income", gIncome, "pos"], ["Spent", gSpent, ""], ["Saved", gSaved, ""]].map(([lbl, v, tone]) => (
+                            <span key={lbl} className="month__fig">
+                              <span className="eyebrow" style={{ display: "block" }}>{lbl}</span>
+                              <span className={`money num ${tone}`} style={{ fontWeight: 700, fontSize: 14 }}>{currency(v)}</span>
+                            </span>
+                          ))}
+                        </span>
+                        <span className="month__chev"><Icon name="chevDown" size={18} /></span>
+                      </button>
+
+                      {isOpen && (
+                        <div className="month__body fade">
+                          {group.entries.length > 0 && (
+                            <>
+                              <div className="list__group" style={{ paddingTop: 16 }}>Income</div>
+                              <div className="list">
+                                {group.entries.map(e => <TxRow key={e.id} {...salaryRowProps(e)} />)}
+                              </div>
+                            </>
+                          )}
+                          {group.expenses.length > 0 && (
+                            <>
+                              <div className="list__group" style={{ paddingTop: 16 }}>Expenses</div>
+                              <div className="list">
+                                {group.expenses.map(e => <TxRow key={e.id} {...expenseRowProps(e)} />)}
+                              </div>
+                            </>
+                          )}
                         </div>
-                        <div>
-                          <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: -0.3 }}>{monthKeyLabel(group.key)}</div>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{group.entries.length} entries · {group.expenses.length} expenses</div>
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 2, textTransform: "uppercase" }}>Income</div>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 15, color: "var(--gold)", fontWeight: 600 }}>{currency(gIncome)}</div>
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 2, textTransform: "uppercase" }}>Spent</div>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 15, color: "var(--rose)", fontWeight: 600 }}>{currency(gSpent)}</div>
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 2, textTransform: "uppercase" }}>Saved</div>
-                          <div style={{ fontFamily: "var(--font-mono)", fontSize: 15, color: "var(--violet)", fontWeight: 600 }}>{currency(gSaved)}</div>
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--text-dim)", transition: "transform .2s", transform: isOpen ? "rotate(90deg)" : "none" }}>▶</div>
-                      </div>
+                      )}
                     </div>
-
-                    {isOpen && (
-                      <div className="anim-fade-in" style={{ padding: "0 22px 22px", borderTop: "1px solid var(--border)" }}>
-                        {group.entries.length > 0 && (
-                          <>
-                            <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 3, textTransform: "uppercase", margin: "18px 0 10px" }}>Income Entries</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                              {group.entries.map(e => <SalaryRow key={e.id} entry={e} />)}
-                            </div>
-                          </>
-                        )}
-                        {group.expenses.length > 0 && (
-                          <>
-                            <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", letterSpacing: 3, textTransform: "uppercase", margin: "18px 0 10px" }}>Expenses</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                              {group.expenses.map(e => (
-                                <div key={e.id} style={{ display: "flex", alignItems: "center", background: "rgba(255,94,126,.04)", border: "1px solid rgba(255,94,126,.1)", borderRadius: 9, padding: "10px 14px", gap: 10 }}>
-                                  <span style={{ fontSize: 14 }}>{tagIcon(e.tag)}</span>
-                                  <div style={{ flex: 1 }}>
-                                    <div style={{ fontSize: 13, fontWeight: 600 }}>{e.name}</div>
-                                    <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{e.tag} · {fmtDate(e.date)}</div>
-                                  </div>
-                                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--rose)", fontWeight: 600 }}>-{currency(e.amount)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+                  );
+                })}
+              </div>
+            )}
+          </main>
         )}
       </div>
 
-      {/* Bottom Mobile Tab Bar */}
-      <div style={{ display: "none", position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(10,10,16,.92)", backdropFilter: "blur(20px)", borderTop: "1px solid var(--border)", padding: "10px 0 18px", zIndex: 100 }} className="ff-mobile-menu">
+      {/* Bottom pill nav (small screens) */}
+      <nav className="bottom-nav" aria-label="Primary">
         {TABS.map(({ id, label, icon }) => (
-          <button key={id} onClick={() => { setTab(id); setMobileNav(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "none", border: "none", color: tab === id ? "var(--gold)" : "var(--text-dim)", fontSize: 11, fontWeight: 600, cursor: "pointer", padding: "6px 0", transition: "color .2s" }}>
-            <span style={{ fontSize: 18 }}>{icon}</span>
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 1, textTransform: "uppercase" }}>{label}</span>
+          <button key={id} className="bottom-nav__item" aria-current={tab === id ? "page" : undefined} aria-label={label} title={label} onClick={() => go(id)}>
+            <Icon name={icon} size={20} />
           </button>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+function PageHeader({ title, sub }) {
+  return (
+    <div className="page-head">
+      <div>
+        <h1 className="page-title">{title}</h1>
+        {sub && <p className="page-sub">{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+// Currency with de-emphasised decimals: ₹1,23,456<span>.78</span>
+function Money({ value, className = "", style }) {
+  const s = currency(value);
+  const i = s.lastIndexOf(".");
+  return (
+    <div className={`money ${className}`} style={style}>
+      {i > -1 ? <>{s.slice(0, i)}<span className="money__dec">{s.slice(i)}</span></> : s}
+    </div>
+  );
+}
+
+function Stat({ label, value, meta, tone }) {
+  return (
+    <div className="stat">
+      <div className="eyebrow">{label}</div>
+      <Money value={value} className={`money--xl ${tone || ""}`} />
+      {meta && <div className="stat__meta" style={{ width: "100%" }}>{meta}</div>}
+    </div>
+  );
+}
+
+// options: ["A","B"] or [["value","Label"], …]
+function Segmented({ options, value, onChange, label }) {
+  return (
+    <div className="seg" role="group" aria-label={label}>
+      {options.map(o => {
+        const [v, l] = Array.isArray(o) ? o : [o, o];
+        return <button key={v} type="button" className="seg__opt" aria-pressed={value === v} onClick={() => onChange(v)}>{l}</button>;
+      })}
+    </div>
+  );
+}
+
+function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive, plain, amountClass, onDelete, deleteLabel }) {
+  const sign = plain ? "" : positive ? "+" : "−";
+  return (
+    <div className="row">
+      <span className={`row__icon ${iconClass}`} style={iconColor ? { color: iconColor } : undefined}><Icon name={icon} size={18} /></span>
+      <div className="row__body">
+        <div className="row__title">{title}</div>
+        <div className="row__meta">{meta}</div>
+      </div>
+      <div className="row__end">
+        <div className={`row__amount ${amountClass || (positive ? "pos" : "")}`}>{sign}{currency(amount)}</div>
+      </div>
+      {onDelete && (
+        <button className="icon-btn icon-btn--quiet icon-btn--danger row__action" onClick={onDelete} aria-label={deleteLabel} title="Delete">
+          <Icon name="trash" size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ChartTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div className="chart-tip">
+      <div className="chart-tip__label">{d.full || d.name}</div>
+      {payload.map(p => (
+        <div key={p.dataKey || p.name} className="chart-tip__row">
+          <span className="legend__item" style={{ color: "var(--text-on-ink-2)" }}>
+            <span className="dot dot--sq" style={{ background: p.payload?.color || (p.dataKey === "saved" && d.current ? "var(--lime-chart)" : p.dataKey === "saved" ? "#fff" : p.color || p.fill) }} />
+            {p.name}
+          </span>
+          <b>{currency(p.value)}</b>
+        </div>
+      ))}
+      {d.pct !== undefined && <div className="chart-tip__row" style={{ color: "var(--text-on-ink-2)" }}><span>Share</span><b>{d.pct.toFixed(1)}%</b></div>}
+    </div>
+  );
+}
+
+function CategoryBreakdown({ data }) {
+  if (data.total === 0) return <EmptyState icon="receipt" title="No spending in this period" text="Expenses you add will be broken down by category here." />;
+  const legendByName = Object.fromEntries(data.legend.map(d => [d.name, d]));
+  const donut = data.donut.map(d => ({ ...d, pct: legendByName[d.name].pct }));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ position: "relative", width: 156, height: 156, flexShrink: 0, margin: "0 auto" }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie data={donut} dataKey="value" nameKey="name" innerRadius="70%" outerRadius="100%" paddingAngle={donut.length > 1 ? 1.5 : 0} stroke="var(--surface)" strokeWidth={2} startAngle={90} endAngle={-270} isAnimationActive={false}>
+              {donut.map(d => <Cell key={d.name} fill={d.color} />)}
+            </Pie>
+            <Tooltip content={<ChartTooltip />} />
+          </PieChart>
+        </ResponsiveContainer>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+          <span className="eyebrow">Total</span>
+          <span className="num" style={{ fontWeight: 700, fontSize: 15 }}>{compactINR(data.total)}</span>
+        </div>
+      </div>
+      <div className="list" style={{ minWidth: 0 }}>
+        {data.legend.map(d => (
+          <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 13 }}>
+            <span className="dot" style={{ background: d.color, width: 10, height: 10 }} />
+            <span style={{ flex: 1, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+            <span className="num" style={{ color: "var(--text-3)", fontWeight: 600, width: 40, textAlign: "right" }}>{d.pct.toFixed(0)}%</span>
+            <span className="num" style={{ fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>{currency(d.value)}</span>
+          </div>
         ))}
       </div>
     </div>
   );
 }
 
-// ─── Sub-components ────────────────────────────────────────────────────────────
-
-function FinDateSelector({ value, onChange }) {
+function FinDateSelector({ value, onChange, label = "Date" }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
     const handleClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handleKey = (e) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => { document.removeEventListener("mousedown", handleClick); document.removeEventListener("keydown", handleKey); };
   }, []);
 
   const [y, m, d] = value ? value.split("-").map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate()];
@@ -978,6 +1442,8 @@ function FinDateSelector({ value, onChange }) {
   const vm = viewDate.getMonth();
   const daysInMonth = new Date(vy, vm + 1, 0).getDate();
   const firstDay = new Date(vy, vm, 1).getDay();
+
+  const toggle = () => { if (!open) setViewDate(new Date(y, m - 1, 1)); setOpen(!open); };
 
   const handleDayClick = (day) => {
     const sel = `${vy}-${String(vm + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
@@ -995,56 +1461,28 @@ function FinDateSelector({ value, onChange }) {
   const isSelected = (day) => d === day && (m - 1) === vm && y === vy;
 
   return (
-    <div className="ff-date-wrapper" ref={ref} style={{ position: "relative", flex: 1, minWidth: 140 }}>
-      {/* Visual Button */}
-      <div className={`ff-date-btn ${open ? "active" : ""}`} onClick={() => setOpen(!open)} style={{
-        display: "flex", alignItems: "center", gap: 10, background: open ? "rgba(240,192,64,.02)" : "rgba(255,255,255,.04)",
-        border: `1px solid ${open ? "rgba(240,192,64,.5)" : "var(--border-hi)"}`,
-        borderRadius: "var(--radius-sm)", padding: "14px", fontFamily: "var(--font-mono)", fontSize: 13,
-        color: open ? "var(--gold)" : "var(--text)", cursor: "pointer", transition: "all .25s var(--ease)",
-        boxShadow: open ? "0 0 0 3px rgba(240,192,64,.08)" : "none", position: "relative", zIndex: 2, height: "100%"
-      }}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: open ? 1 : 0.7 }}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-        <span style={{ flex: 1 }}>{dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5, transform: open ? "rotate(180deg)" : "none", transition: "transform .25s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
-      </div>
+    <div className="datepick" ref={ref}>
+      <button type="button" className="datepick__btn" onClick={toggle} aria-expanded={open} aria-haspopup="dialog" aria-label={`${label}: ${fmtDate(value)}`}>
+        <Icon name="calendar" size={16} />
+        <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
+      </button>
 
-      {/* Popup Calendar */}
       {open && (
-        <div className="anim-pop ff-cal-popup" style={{
-          position: "absolute", top: "calc(100% + 8px)", zIndex: 50, background: "var(--surface-2)", border: "1px solid var(--border-hi)",
-          borderRadius: "var(--radius)", padding: 16, boxShadow: "0 16px 48px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,0.05) inset",
-          transformOrigin: "top left"
-        }}>
-          {/* Header */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ fontFamily: "var(--font-ui)", fontSize: 15, fontWeight: 600 }}>{viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>
+        <div className="datepick__pop" role="dialog" aria-label={label}>
+          <div className="datepick__head">
+            <span>{viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>
             <div style={{ display: "flex", gap: 4 }}>
-              <button type="button" onClick={prevMonth} className="ff-cal-nav">←</button>
-              <button type="button" onClick={nextMonth} className="ff-cal-nav">→</button>
+              <button type="button" onClick={prevMonth} className="icon-btn" style={{ width: 32, height: 32 }} aria-label="Previous month"><Icon name="chevLeft" size={16} /></button>
+              <button type="button" onClick={nextMonth} className="icon-btn" style={{ width: 32, height: 32 }} aria-label="Next month"><Icon name="chevRight" size={16} /></button>
             </div>
           </div>
-          {/* Days Header */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, marginBottom: 8, textAlign: "center", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase" }}>
-            {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(d => <div key={d}>{d}</div>)}
-          </div>
-          {/* Grid */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 }}>
+          <div className="datepick__grid">
+            {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(x => <div key={x} className="datepick__dow">{x}</div>)}
             {Array.from({ length: firstDay }).map((_, i) => <div key={`b-${i}`} />)}
             {Array.from({ length: daysInMonth }).map((_, i) => {
               const day = i + 1;
-              const sel = isSelected(day);
-              const tod = isToday(day);
-              return (
-                <button type="button" key={day} onClick={() => handleDayClick(day)} className={`ff-cal-day ${sel ? "selected" : ""}`} style={{
-                  background: sel ? "var(--grad-gold)" : tod ? "rgba(255,255,255,.08)" : "transparent",
-                  color: sel ? "#000" : tod ? "var(--text)" : "var(--text-mid)",
-                  border: sel ? "none" : tod ? "1px solid var(--border-hi)" : "1px solid transparent",
-                  borderRadius: 8, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center",
-                  fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: sel ? 700 : 500, cursor: "pointer",
-                  transition: "all .2s"
-                }}>{day}</button>
-              );
+              const cls = isSelected(day) ? " datepick__day--sel" : isToday(day) ? " datepick__day--today" : "";
+              return <button type="button" key={day} onClick={() => handleDayClick(day)} className={`datepick__day${cls}`} aria-pressed={isSelected(day)}>{day}</button>;
             })}
           </div>
         </div>
@@ -1053,115 +1491,12 @@ function FinDateSelector({ value, onChange }) {
   );
 }
 
-function MetricCard({ color, grad, icon, label, value, sub, pct, pctLabel, delay = "", negative = false }) {
+function EmptyState({ icon, title, text }) {
   return (
-    <div className={`ff-card anim-card ${delay}`} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 22, position: "relative", overflow: "hidden", cursor: "default", transition: "all .3s var(--ease)", boxShadow: "0 4px 24px rgba(0,0,0,.3)" }}>
-      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: grad, opacity: 0.8 }} />
-      <div style={{ position: "absolute", bottom: -40, right: -40, width: 120, height: 120, background: `radial-gradient(circle,${color.replace("var(", "").replace(")", "") === "--gold" ? "rgba(240,192,64,.07)" : color.includes("teal") ? "rgba(45,226,213,.07)" : color.includes("violet") ? "rgba(167,139,250,.07)" : "rgba(255,94,126,.07)"} 0%,transparent 65%)`, pointerEvents: "none" }} />
-      <div style={{ fontSize: 20, marginBottom: 12, opacity: .85 }}>{icon}</div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 2.5, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 6 }}>{label}</div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 22, fontWeight: 600, color: negative ? "var(--rose)" : color, letterSpacing: -0.5, marginBottom: 4, animation: "number-count .4s var(--ease) both" }}>{value}</div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", marginBottom: 12 }}>{sub}</div>
-      <div style={{ height: 3, background: "rgba(255,255,255,.06)", borderRadius: 2, overflow: "hidden" }}>
-        <div style={{ height: "100%", background: negative ? "var(--rose)" : grad, width: `${Math.min(100, Math.max(0, pct))}%`, borderRadius: 2, animation: "bar-grow .8s var(--ease) both" }} />
-      </div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", marginTop: 4 }}>{pctLabel}</div>
+    <div className="empty">
+      <span className="empty__icon"><Icon name={icon} size={20} /></span>
+      {title && <div className="empty__title">{title}</div>}
+      {text && <div className="empty__text">{text}</div>}
     </div>
   );
-}
-
-function Panel({ title, children, accentColor, style = {} }) {
-  return (
-    <div className="anim-card" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 22, position: "relative", ...style }}>
-      {accentColor && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: accentColor, opacity: .5 }} />}
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 600, letterSpacing: 2.5, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 16 }}>{title}</div>
-      {children}
-    </div>
-  );
-}
-
-function PageHeader({ title, sub }) {
-  return (
-    <div className="anim-fade-up" style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 24 }}>
-      <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -1, color: "var(--text)" }}>{title}</h1>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", letterSpacing: 2.5, textTransform: "uppercase" }}>{sub}</span>
-    </div>
-  );
-}
-
-function FInput({ style = {}, type = "text", inputMode, placeholder, value, onChange, onKeyDown, required }) {
-  return (
-    <input type={type} inputMode={inputMode} placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown} required={required} className="ff-input"
-      style={{ flex: 1, background: "rgba(255,255,255,.04)", border: "1px solid var(--border-hi)", borderRadius: "var(--radius-sm)", padding: "12px 14px", fontFamily: "var(--font-ui)", fontSize: 14, color: "var(--text)", outline: "none", transition: "all .25s var(--ease)", ...style }}
-    />
-  );
-}
-
-function SalaryRow({ entry: e, onDelete, delay = 0 }) {
-  const isExtra = e.savingsTag === "Extra";
-  return (
-    <div className="ff-row anim-card" style={{ animationDelay: `${delay * 0.05}s`, background: isExtra ? "rgba(45,226,213,.035)" : "rgba(240,192,64,.035)", border: `1px solid ${isExtra ? "rgba(45,226,213,.12)" : "rgba(240,192,64,.12)"}`, borderRadius: 10, padding: "13px 15px", display: "flex", alignItems: "center", justifyContent: "space-between", transition: "all .25s cubic-bezier(0.34, 1.56, 0.64, 1)", gap: 10 }}>
-      <div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)", marginBottom: 3 }}>{fmtDate(e.date)} {isExtra && <span className="anim-pop" style={{ display: "inline-block", color: "var(--teal)", marginLeft: 6, padding: "2px 6px", background: "var(--teal-dim)", borderRadius: 4, fontSize: 9 }}>Extra Income</span>}</div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 18, color: isExtra ? "var(--teal)" : "var(--gold)", fontWeight: 600 }}>{currency(e.amount)}</div>
-      </div>
-      <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-        {!isExtra && (
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 1.5 }}>Tithe</div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--gold)" }}>{currency(e.tithe)}</div>
-          </div>
-        )}
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 1.5 }}>Wants</div>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--teal)" }}>{currency(e.wantsAlloc)}</div>
-        </div>
-        {!isExtra && (
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 1.5 }}>Savings</div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--violet)" }}>{currency(e.savingsAlloc)}</div>
-          </div>
-        )}
-        {!isExtra && (
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 1.5 }}>Tag</div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: e.savingsTag === "Investment" ? "var(--violet)" : "var(--gold)" }}>{e.savingsTag}</div>
-          </div>
-        )}
-      </div>
-      {onDelete && <button className="ff-del" onClick={onDelete} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 11, padding: "5px 8px", transition: "all .2s", flexShrink: 0 }}>✕</button>}
-    </div>
-  );
-}
-
-function GoldButton({ children, onClick, disabled, type, style = {} }) {
-  return (
-    <button type={type} onClick={onClick} disabled={disabled} className="ff-gold-btn"
-      style={{ background: disabled ? "rgba(255,255,255,.06)" : "var(--grad-gold)", border: "none", borderRadius: "var(--radius-sm)", padding: "14px 26px", fontSize: 14, fontWeight: 700, color: disabled ? "var(--text-dim)" : "#050508", cursor: disabled ? "not-allowed" : "pointer", transition: "all .25s var(--ease)", boxShadow: disabled ? "none" : "0 4px 16px rgba(240,192,64,.25)", whiteSpace: "nowrap", ...style }}>
-      {children}
-    </button>
-  );
-}
-
-function TealButton({ children, onClick, disabled, className = "" }) {
-  return (
-    <button onClick={onClick} disabled={disabled} className={className}
-      style={{ background: disabled ? "rgba(255,255,255,.04)" : "rgba(45,226,213,.1)", border: `1px solid ${disabled ? "var(--border)" : "rgba(45,226,213,.28)"}`, borderRadius: "var(--radius-sm)", padding: "12px 18px", fontSize: 13, fontWeight: 700, color: disabled ? "var(--text-dim)" : "var(--teal)", cursor: disabled ? "not-allowed" : "pointer", transition: "all .2s" }}>
-      {children}
-    </button>
-  );
-}
-
-function EmptyState({ icon, text }) {
-  return (
-    <div className="anim-fade-in" style={{ textAlign: "center", padding: "52px 20px" }}>
-      <div style={{ fontSize: 36, marginBottom: 14, opacity: .25, animation: "float 4s ease-in-out infinite" }}>{icon}</div>
-      <div style={{ color: "var(--text-dim)", fontSize: 12, fontFamily: "var(--font-mono)", lineHeight: 1.9, whiteSpace: "pre-line" }}>{text}</div>
-    </div>
-  );
-}
-
-function tagIcon(tag) {
-  const map = { Food: "🍔", Transport: "🚗", Bills: "⚡", Health: "❤️", Entertainment: "🎬", Shopping: "🛍", General: "📌", Other: "📦" };
-  return map[tag] || "📌";
 }
