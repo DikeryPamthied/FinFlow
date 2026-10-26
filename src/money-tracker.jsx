@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie } from 'recharts';
 import jsPDF from 'jspdf';
@@ -50,7 +51,17 @@ const CATEGORIES = [
 ];
 const catMeta = (tag) => CATEGORIES.find(c => c.id === tag) || CATEGORIES[CATEGORIES.length - 1];
 
-const GOAL_COLORS = ["var(--c-ink)", "var(--c-lime)", "var(--c-blue)", "var(--c-orange)", "var(--c-green)", "var(--c-rose)"];
+const TAB_IDS = ["dashboard", "expenses", "savings", "goals", "lending", "history"];
+const tabFromHash = () => { const h = window.location.hash.slice(1); return TAB_IDS.includes(h) ? h : "dashboard"; };
+
+const MOBILE_MQ = "(max-width: 960px)";
+const subscribeMQ = (cb) => { const m = window.matchMedia(MOBILE_MQ); m.addEventListener("change", cb); return () => m.removeEventListener("change", cb); };
+const useIsMobile = () => useSyncExternalStore(subscribeMQ, () => window.matchMedia(MOBILE_MQ).matches);
+
+// Light tap feedback where supported (Android); silently ignored elsewhere
+const haptic = (ms = 8) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } };
+
+const GOAL_COLORS =["var(--c-ink)", "var(--c-lime)", "var(--c-blue)", "var(--c-orange)", "var(--c-green)", "var(--c-rose)"];
 
 // ─── Supabase helpers ─────────────────────────────────────────────────────────
 async function loadData() {
@@ -245,7 +256,7 @@ export default function App() {
   const [expenses, setExpenses] = useState([]);
   const [goals, setGoals] = useState(() => readLocalArray('finflow_goals'));
   const [loans, setLoans] = useState(() => readLocalArray('finflow_loans'));
-  const [tab, setTab] = useState("dashboard");
+  const [tab, setTab] = useState(tabFromHash);
   const [openMonth, setOpenMonth] = useState(null);
 
   // Salary form
@@ -290,6 +301,58 @@ export default function App() {
   const [catScope, setCatScope] = useState("month");
 
   const incomeFormRef = useRef(null);
+
+  // ── App-like navigation: hash-backed tabs (phone back gesture works), slide direction,
+  //    per-tab scroll memory, bottom sheets, toasts, keyboard-aware bottom nav ──
+  const isMobile = useIsMobile();
+  const [dir, setDir] = useState(0);
+  const [sheet, setSheet] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [scrolled, setScrolled] = useState(false);
+  const tabRef = useRef(tab);
+  const sheetRef = useRef(sheet);
+  const scrollPos = useRef({});
+
+  useEffect(() => { tabRef.current = tab; sheetRef.current = sheet; });
+
+  useEffect(() => {
+    if (!window.history.state?.tab) window.history.replaceState({ tab: tabRef.current }, "", `#${tabRef.current}`);
+    const onPop = (e) => {
+      if (sheetRef.current) { setSheet(null); return; } // back closes the open sheet first
+      const next = e.state?.tab || tabFromHash();
+      const prev = tabRef.current;
+      if (next === prev) return;
+      scrollPos.current[prev] = window.scrollY;
+      setDir(TAB_IDS.indexOf(next) > TAB_IDS.indexOf(prev) ? 1 : -1);
+      setTab(next);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  useLayoutEffect(() => { window.scrollTo(0, scrollPos.current[tab] || 0); }, [tab]);
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 56);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const isField = (el) => el?.matches?.("input:not([type=checkbox]):not([type=radio]), select, textarea");
+    const root = document.documentElement;
+    const onIn = (e) => { if (isField(e.target)) root.classList.add("kb-open"); };
+    const onOut = () => setTimeout(() => { if (!isField(document.activeElement)) root.classList.remove("kb-open"); }, 60);
+    document.addEventListener("focusin", onIn);
+    document.addEventListener("focusout", onOut);
+    return () => { document.removeEventListener("focusin", onIn); document.removeEventListener("focusout", onOut); root.classList.remove("kb-open"); };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2200);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
@@ -392,12 +455,15 @@ export default function App() {
     if (!error && data) {
       setSalaryEntries(prev => [{ id: data[0].id, date: sDate, amount, savingsTag: finalTag, tithe, wantsAlloc, savingsAlloc }, ...prev]);
       setSAmt(""); setSDate(localToday());
+      return true;
     }
+    return false;
   };
 
   const delSalary = async (id) => {
     const { error } = await supabase.from('salary_entries').delete().eq('id', id);
     if (!error) setSalaryEntries(prev => prev.filter(e => e.id !== id));
+    return !error;
   };
 
   const addExpense = async () => {
@@ -409,12 +475,15 @@ export default function App() {
     if (!error && data) {
       setExpenses(prev => [{ id: data[0].id, date: eDate, name: eName.trim(), amount, tag: eTag }, ...prev]);
       setEName(""); setEAmt(""); setEDate(localToday());
+      return true;
     }
+    return false;
   };
 
   const delExpense = async (id) => {
     const { error } = await supabase.from('expenses').delete().eq('id', id);
     if (!error) setExpenses(prev => prev.filter(e => e.id !== id));
+    return !error;
   };
 
   const addGoal = () => {
@@ -423,6 +492,7 @@ export default function App() {
     const newGoal = { id: crypto.randomUUID(), name: gName.trim(), target_amount: target, current_amount: 0, color: gColor };
     setGoals(prev => [newGoal, ...prev]);
     setGName(""); setGTarget("");
+    return true;
   };
 
   const delGoal = (id) => {
@@ -441,6 +511,7 @@ export default function App() {
     const newLoan = { id: crypto.randomUUID(), name: lName.trim(), amount, repaid_amount: 0, date: lDate, note: lNote, status: 'pending' };
     setLoans(prev => [newLoan, ...prev]);
     setLName(""); setLAmt(""); setLNote(""); setLDate(localToday());
+    return true;
   };
 
   const markLoanRepaid = (id) => {
@@ -550,11 +621,191 @@ export default function App() {
     { id: "history", label: "History", icon: "clock" },
   ];
 
-  const go = (id) => { setTab(id); window.scrollTo({ top: 0 }); };
-  const userName = session.user?.email?.split("@")[0] || "there";
   const activeLoans = loans.filter(l => l.status === 'pending');
   const repaidLoans = loans.filter(l => l.status === 'repaid');
   const overBudget = T.wantsBalance < 0;
+
+  const go = (id) => {
+    if (id === tab) { window.scrollTo({ top: 0, behavior: "smooth" }); return; } // re-tap: back to top
+    haptic();
+    scrollPos.current[tab] = window.scrollY;
+    setDir(TAB_IDS.indexOf(id) > TAB_IDS.indexOf(tab) ? 1 : -1);
+    window.history.pushState({ tab: id }, "", `#${id}`);
+    setTab(id);
+  };
+  const openSheet = (name) => { haptic(); window.history.pushState({ tab, sheet: name }, "", window.location.hash); setSheet(name); };
+  const closeSheet = () => { if (window.history.state?.sheet) window.history.back(); else setSheet(null); };
+  const notify = (msg, tone = "pos") => setToast((t) => ({ id: (t?.id ?? 0) + 1, msg, tone }));
+
+  // Form submit / delete wrappers: same handlers, plus feedback
+  const submitIncome = async () => { if (await addSalary()) { haptic(12); notify(isExtra ? "Extra income added" : "Salary recorded"); closeSheet(); } };
+  const submitExpense = async () => { if (await addExpense()) { haptic(12); notify("Expense added"); closeSheet(); } };
+  const submitGoal = () => { if (addGoal()) { haptic(12); notify("Goal created"); closeSheet(); } };
+  const submitLoan = () => { if (addLoan()) { haptic(12); notify("Loan recorded"); closeSheet(); } };
+  const removeSalary = async (id) => { haptic(14); notify(await delSalary(id) ? "Income entry deleted" : "Couldn't delete — try again", "neg"); };
+  const removeExpense = async (id) => { haptic(14); notify(await delExpense(id) ? "Expense deleted" : "Couldn't delete — try again", "neg"); };
+
+  const userName = session.user?.email?.split("@")[0] || "there";
+  const pageTitle = tab === "dashboard" ? "Dashboard" : TABS.find(t => t.id === tab)?.label;
+  const incomeHint = isExtra ? "Extra income goes 100% to your wants balance." : "Salary is split 10% tithe · 45% wants · 45% savings.";
+
+  const renderIncomeForm = (inSheet) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {inSheet && (
+        <div className="field">
+          <Segmented options={["Salary", "Extra"]} value={incType} onChange={setIncType} label="Income type" />
+          <span className="card__sub">{incomeHint}</span>
+        </div>
+      )}
+      <div className="form-row" style={{ alignItems: "flex-end" }}>
+        <label className="field" style={{ flex: "2 1 220px" }}>
+          <span className="field__label">Amount</span>
+          <span className="input-wrap">
+            <span className="input-prefix input-prefix--lg">₹</span>
+            <input type="number" inputMode="decimal" enterKeyHint="done" placeholder="0.00" value={sAmt} onChange={e => setSAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && submitIncome()} className="input input--amount" />
+          </span>
+        </label>
+        <div className="field" style={{ flex: "1 1 170px" }}>
+          <span className="field__label">Date</span>
+          <FinDateSelector value={sDate} onChange={setSDate} label="Income date" />
+        </div>
+      </div>
+
+      {!isExtra && (
+        <div className="field">
+          <span className="field__label">Savings go to</span>
+          <Segmented options={["Investment", "Emergency"]} value={sTag} onChange={setSTag} label="Savings destination" />
+        </div>
+      )}
+
+      <div className="tile">
+        <div className="stack" aria-hidden="true">
+          {isExtra
+            ? <span style={{ flexGrow: 1, background: "var(--lime-chart)" }} />
+            : <>
+              <span style={{ flexGrow: 10, background: "var(--text-3)" }} />
+              <span style={{ flexGrow: 45, background: "var(--lime-chart)" }} />
+              <span style={{ flexGrow: 45, background: "var(--ink)" }} />
+            </>}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 14 }}>
+          {(isExtra
+            ? [["Wants · 100%", pWants, "var(--lime-chart)"], ["New wants balance", T.wantsBalance + pWants, null]]
+            : [["Tithe · 10%", pTithe, "var(--text-3)"], ["Wants · 45%", pWants, "var(--lime-chart)"], ["Savings · 45%", pSavings, "var(--ink)"], ["New wants balance", T.wantsBalance + pWants, null]]
+          ).map(([lbl, val, col]) => (
+            <div key={lbl}>
+              <div className="legend__item eyebrow">{col && <span className="dot dot--sq" style={{ background: col }} />}{lbl}</div>
+              <Money value={hasPrev || !col ? val : 0} className="money--md" style={{ marginTop: 2, color: hasPrev ? undefined : "var(--text-3)" }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button className={`btn btn--primary${inSheet ? " btn--block" : ""}`} onClick={submitIncome} disabled={!hasPrev} style={inSheet ? undefined : { alignSelf: "flex-start" }}>
+        <Icon name="plus" size={16} /> Add {isExtra ? "extra income" : "salary"}
+      </button>
+    </div>
+  );
+
+  const expenseForm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <label className="field">
+        <span className="field__label">Description</span>
+        <input className="input" placeholder="e.g. Groceries" enterKeyHint="next" autoComplete="off" value={eName} onChange={e => setEName(e.target.value)} />
+      </label>
+      <div className="form-row">
+        <label className="field">
+          <span className="field__label">Amount</span>
+          <span className="input-wrap">
+            <span className="input-prefix">₹</span>
+            <input className="input num" type="number" inputMode="decimal" enterKeyHint="done" placeholder="0.00" value={eAmt} onChange={e => setEAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && submitExpense()} />
+          </span>
+        </label>
+        <div className="field">
+          <span className="field__label">Date</span>
+          <FinDateSelector value={eDate} onChange={setEDate} label="Expense date" />
+        </div>
+      </div>
+      <div className="field">
+        <span className="field__label">Category</span>
+        <div className="chip-grid" role="group" aria-label="Category">
+          {CATEGORIES.map(c => (
+            <button key={c.id} type="button" className="chip" aria-pressed={eTag === c.id} onClick={() => { haptic(5); setETag(c.id); }}>
+              <Icon name={c.icon} size={18} />
+              <span>{c.id}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <button className="btn btn--primary btn--block" onClick={submitExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0}>
+        <Icon name="plus" size={16} /> Add expense
+      </button>
+      {overBudget && (
+        <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Over budget by {currency(Math.abs(T.wantsBalance))}</span></div>
+      )}
+    </div>
+  );
+
+  const goalForm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <label className="field">
+        <span className="field__label">Name</span>
+        <input className="input" placeholder="e.g. New car" enterKeyHint="next" autoComplete="off" value={gName} onChange={e => setGName(e.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field__label">Target amount</span>
+        <span className="input-wrap">
+          <span className="input-prefix">₹</span>
+          <input className="input num" type="number" inputMode="decimal" enterKeyHint="done" placeholder="0.00" value={gTarget} onChange={e => setGTarget(e.target.value)} onKeyDown={e => e.key === "Enter" && submitGoal()} />
+        </span>
+      </label>
+      <div className="field">
+        <span className="field__label">Colour</span>
+        <div style={{ display: "flex", gap: 10, padding: "4px 2px" }} role="group" aria-label="Goal colour">
+          {GOAL_COLORS.map(c => <button key={c} type="button" className="swatch" aria-pressed={gColor === c} aria-label={c.replace("var(--c-", "").replace(")", "")} onClick={() => setGColor(c)} style={{ background: c }} />)}
+        </div>
+      </div>
+      <button className="btn btn--primary btn--block" onClick={submitGoal} disabled={!gName.trim() || !gTarget || parseFloat(gTarget) <= 0}>
+        <Icon name="plus" size={16} /> Create goal
+      </button>
+    </div>
+  );
+
+  const loanForm = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <label className="field">
+        <span className="field__label">Person</span>
+        <input className="input" placeholder="Name" enterKeyHint="next" autoComplete="off" value={lName} onChange={e => setLName(e.target.value)} />
+      </label>
+      <div className="form-row">
+        <label className="field">
+          <span className="field__label">Amount</span>
+          <span className="input-wrap">
+            <span className="input-prefix">₹</span>
+            <input className="input num" type="number" inputMode="decimal" enterKeyHint="next" placeholder="0.00" value={lAmt} onChange={e => setLAmt(e.target.value)} />
+          </span>
+        </label>
+        <div className="field">
+          <span className="field__label">Date</span>
+          <FinDateSelector value={lDate} onChange={setLDate} label="Loan date" />
+        </div>
+      </div>
+      <label className="field">
+        <span className="field__label">Note <span style={{ color: "var(--text-3)", fontWeight: 500 }}>(optional)</span></span>
+        <input className="input" placeholder="What was it for?" enterKeyHint="done" autoComplete="off" value={lNote} onChange={e => setLNote(e.target.value)} onKeyDown={e => e.key === "Enter" && submitLoan()} />
+      </label>
+      <button className="btn btn--primary btn--block" onClick={submitLoan} disabled={!lName.trim() || !lAmt || parseFloat(lAmt) <= 0}>
+        <Icon name="plus" size={16} /> Record loan
+      </button>
+    </div>
+  );
+
+  const SHEETS = {
+    income: { title: "Record income", body: renderIncomeForm(true) },
+    expense: { title: "Add expense", body: expenseForm },
+    goal: { title: "New goal", body: goalForm },
+    loan: { title: "New loan", body: loanForm },
+  };
 
   const salaryRowProps = (e, onDelete) => {
     const extra = e.savingsTag === "Extra";
@@ -579,8 +830,11 @@ export default function App() {
     <>
       <div className="shell">
         {/* ── Top bar ── */}
-        <header className="topbar">
-          <div className="brand"><LogoMark /> FinFlow</div>
+        <header className="topbar" data-scrolled={scrolled}>
+          <div className="topbar__lead">
+            <div className="brand"><LogoMark /> FinFlow</div>
+            <div className="topbar__title" aria-hidden="true">{pageTitle}</div>
+          </div>
 
           <nav className="topnav" aria-label="Primary">
             {TABS.map(({ id, label, icon }) => (
@@ -603,7 +857,7 @@ export default function App() {
 
         {/* ══ DASHBOARD ══ */}
         {tab === "dashboard" && (
-          <main key="dashboard" className="rise">
+          <main key="dashboard" className="page" style={{ "--dir": dir }}>
             <PageHeader title={`Hello, ${userName}`} sub={new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} />
 
             <div className="dash">
@@ -629,10 +883,10 @@ export default function App() {
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                  <button className="quick" onClick={() => incomeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>
+                  <button className="quick" onClick={() => isMobile ? openSheet("income") : incomeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>
                     <span className="quick__circle"><Icon name="plus" /></span>Income
                   </button>
-                  <button className="quick" onClick={() => go("expenses")}>
+                  <button className="quick" onClick={() => isMobile ? openSheet("expense") : go("expenses")}>
                     <span className="quick__circle"><Icon name="up" /></span>Expense
                   </button>
                   <button className="quick" onClick={() => go("history")}>
@@ -737,64 +991,15 @@ export default function App() {
               </section>
 
               {/* Record income */}
-              <section className="card a-income" ref={incomeFormRef}>
+              <section className="card a-income desktop-only" ref={incomeFormRef}>
                 <div className="card__head">
                   <div>
                     <div className="card__title">Record income</div>
-                    <div className="card__sub">{isExtra ? "Extra income goes 100% to your wants balance." : "Salary is split 10% tithe · 45% wants · 45% savings."}</div>
+                    <div className="card__sub">{incomeHint}</div>
                   </div>
                   <Segmented options={["Salary", "Extra"]} value={incType} onChange={setIncType} label="Income type" />
                 </div>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  <div className="form-row" style={{ alignItems: "flex-end" }}>
-                    <label className="field" style={{ flex: "2 1 220px" }}>
-                      <span className="field__label">Amount</span>
-                      <span className="input-wrap">
-                        <span className="input-prefix input-prefix--lg">₹</span>
-                        <input type="number" inputMode="decimal" placeholder="0.00" value={sAmt} onChange={e => setSAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addSalary()} className="input input--amount" />
-                      </span>
-                    </label>
-                    <div className="field" style={{ flex: "1 1 170px" }}>
-                      <span className="field__label">Date</span>
-                      <FinDateSelector value={sDate} onChange={setSDate} label="Income date" />
-                    </div>
-                  </div>
-
-                  {!isExtra && (
-                    <div className="field">
-                      <span className="field__label">Savings go to</span>
-                      <Segmented options={["Investment", "Emergency"]} value={sTag} onChange={setSTag} label="Savings destination" />
-                    </div>
-                  )}
-
-                  <div className="tile">
-                    <div className="stack" aria-hidden="true">
-                      {isExtra
-                        ? <span style={{ flexGrow: 1, background: "var(--lime-chart)" }} />
-                        : <>
-                          <span style={{ flexGrow: 10, background: "var(--text-3)" }} />
-                          <span style={{ flexGrow: 45, background: "var(--lime-chart)" }} />
-                          <span style={{ flexGrow: 45, background: "var(--ink)" }} />
-                        </>}
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 14 }}>
-                      {(isExtra
-                        ? [["Wants · 100%", pWants, "var(--lime-chart)"], ["New wants balance", T.wantsBalance + pWants, null]]
-                        : [["Tithe · 10%", pTithe, "var(--text-3)"], ["Wants · 45%", pWants, "var(--lime-chart)"], ["Savings · 45%", pSavings, "var(--ink)"], ["New wants balance", T.wantsBalance + pWants, null]]
-                      ).map(([lbl, val, col]) => (
-                        <div key={lbl}>
-                          <div className="legend__item eyebrow">{col && <span className="dot dot--sq" style={{ background: col }} />}{lbl}</div>
-                          <Money value={hasPrev || !col ? val : 0} className="money--md" style={{ marginTop: 2, color: hasPrev ? undefined : "var(--text-3)" }} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button className="btn btn--primary" onClick={addSalary} disabled={!hasPrev} style={{ alignSelf: "flex-start" }}>
-                    <Icon name="plus" size={16} /> Add {isExtra ? "extra income" : "salary"}
-                  </button>
-                </div>
+                {renderIncomeForm(false)}
               </section>
 
               {/* Recent activity */}
@@ -811,8 +1016,8 @@ export default function App() {
                       <div key={day.date}>
                         <div className="list__group">{dayLabel(day.date)}</div>
                         {day.items.map(it => it.kind === "income"
-                          ? <TxRow key={it.id} {...salaryRowProps(it.entry, () => delSalary(it.rawId))} />
-                          : <TxRow key={it.id} {...expenseRowProps(it.entry, () => delExpense(it.rawId), false)} />)}
+                          ? <TxRow key={it.id} {...salaryRowProps(it.entry, () => removeSalary(it.rawId))} />
+                          : <TxRow key={it.id} {...expenseRowProps(it.entry, () => removeExpense(it.rawId), false)} />)}
                       </div>
                     ))}
                   </div>
@@ -824,8 +1029,8 @@ export default function App() {
 
         {/* ══ EXPENSES ══ */}
         {tab === "expenses" && (
-          <main key="expenses" className="rise">
-            <PageHeader title="Expenses" sub="Everything you've spent from your wants balance" />
+          <main key="expenses" className="page" style={{ "--dir": dir }}>
+            <PageHeader title="Expenses" sub="Everything you've spent from your wants balance" action={() => openSheet("expense")} actionLabel="Add expense" />
 
             <section className="card card--flush" style={{ marginBottom: 16 }}>
               <div className="stat-strip">
@@ -836,44 +1041,9 @@ export default function App() {
             </section>
 
             <div className="split">
-              <section className="card">
+              <section className="card desktop-only">
                 <div className="card__head"><div className="card__title">Add expense</div></div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  <label className="field">
-                    <span className="field__label">Description</span>
-                    <input className="input" placeholder="e.g. Groceries" value={eName} onChange={e => setEName(e.target.value)} />
-                  </label>
-                  <div className="form-row">
-                    <label className="field">
-                      <span className="field__label">Amount</span>
-                      <span className="input-wrap">
-                        <span className="input-prefix">₹</span>
-                        <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={eAmt} onChange={e => setEAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && addExpense()} />
-                      </span>
-                    </label>
-                    <div className="field">
-                      <span className="field__label">Date</span>
-                      <FinDateSelector value={eDate} onChange={setEDate} label="Expense date" />
-                    </div>
-                  </div>
-                  <div className="field">
-                    <span className="field__label">Category</span>
-                    <div className="chip-grid" role="group" aria-label="Category">
-                      {CATEGORIES.map(c => (
-                        <button key={c.id} type="button" className="chip" aria-pressed={eTag === c.id} onClick={() => setETag(c.id)}>
-                          <Icon name={c.icon} size={18} />
-                          <span>{c.id}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <button className="btn btn--primary btn--block" onClick={addExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0}>
-                    <Icon name="plus" size={16} /> Add expense
-                  </button>
-                  {overBudget && (
-                    <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Over budget by {currency(Math.abs(T.wantsBalance))}</span></div>
-                  )}
-                </div>
+                {expenseForm}
               </section>
 
               <section className="card">
@@ -910,10 +1080,10 @@ export default function App() {
                               <span>{dayLabel(day.date)}</span>
                               <span className="num">{currency(sum(day.items, x => x.amount))}</span>
                             </div>
-                            {day.items.map(e => <TxRow key={e.id} {...expenseRowProps(e, () => delExpense(e.id), false)} />)}
+                            {day.items.map(e => <TxRow key={e.id} {...expenseRowProps(e, () => removeExpense(e.id), false)} />)}
                           </div>
                         ))
-                        : expenseView.list.slice(0, eLimit).map(e => <TxRow key={e.id} {...expenseRowProps(e, () => delExpense(e.id))} />)}
+                        : expenseView.list.slice(0, eLimit).map(e => <TxRow key={e.id} {...expenseRowProps(e, () => removeExpense(e.id))} />)}
                       {expenseView.list.length > eLimit && (
                         <button className="btn btn--secondary btn--sm" style={{ alignSelf: "center", marginTop: 12 }} onClick={() => setELimit(l => l + 30)}>
                           Show more ({expenseView.list.length - eLimit} left)
@@ -928,7 +1098,7 @@ export default function App() {
 
         {/* ══ SAVINGS ══ */}
         {tab === "savings" && (
-          <main key="savings" className="rise">
+          <main key="savings" className="page" style={{ "--dir": dir }}>
             <PageHeader title="Savings" sub="45% of every salary, set aside automatically" />
             <div className="split" style={{ marginBottom: 16 }}>
               <section className="card card--ink" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -1004,8 +1174,8 @@ export default function App() {
 
         {/* ══ GOALS ══ */}
         {tab === "goals" && (
-          <main key="goals" className="rise">
-            <PageHeader title="Goals" sub="Targets you're saving toward" />
+          <main key="goals" className="page" style={{ "--dir": dir }}>
+            <PageHeader title="Goals" sub="Targets you're saving toward" action={() => openSheet("goal")} actionLabel="New goal" />
             {goals.length > 0 && (
               <section className="card card--flush" style={{ marginBottom: 16 }}>
                 <div className="stat-strip">
@@ -1016,30 +1186,9 @@ export default function App() {
               </section>
             )}
             <div className="split">
-              <section className="card">
+              <section className="card desktop-only">
                 <div className="card__head"><div className="card__title">New goal</div></div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  <label className="field">
-                    <span className="field__label">Name</span>
-                    <input className="input" placeholder="e.g. New car" value={gName} onChange={e => setGName(e.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span className="field__label">Target amount</span>
-                    <span className="input-wrap">
-                      <span className="input-prefix">₹</span>
-                      <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={gTarget} onChange={e => setGTarget(e.target.value)} onKeyDown={e => e.key === "Enter" && addGoal()} />
-                    </span>
-                  </label>
-                  <div className="field">
-                    <span className="field__label">Colour</span>
-                    <div style={{ display: "flex", gap: 10, padding: "4px 2px" }} role="group" aria-label="Goal colour">
-                      {GOAL_COLORS.map(c => <button key={c} type="button" className="swatch" aria-pressed={gColor === c} aria-label={c.replace("var(--c-", "").replace(")", "")} onClick={() => setGColor(c)} style={{ background: c }} />)}
-                    </div>
-                  </div>
-                  <button className="btn btn--primary btn--block" onClick={addGoal} disabled={!gName.trim() || !gTarget || parseFloat(gTarget) <= 0}>
-                    <Icon name="plus" size={16} /> Create goal
-                  </button>
-                </div>
+                {goalForm}
               </section>
 
               <section>
@@ -1061,7 +1210,7 @@ export default function App() {
                               {done ? <span className="badge badge--pos" style={{ marginTop: 2 }}><Icon name="check" size={12} stroke={2.4} />Completed</span>
                                 : <div className="row__meta">{currency(g.target_amount - g.current_amount)} to go</div>}
                             </div>
-                            <button className="icon-btn icon-btn--danger" onClick={() => delGoal(g.id)} aria-label={`Delete goal ${g.name}`} title="Delete goal"><Icon name="trash" size={16} /></button>
+                            <button className="icon-btn icon-btn--danger" onClick={() => { haptic(14); delGoal(g.id); notify("Goal deleted"); }} aria-label={`Delete goal ${g.name}`} title="Delete goal"><Icon name="trash" size={16} /></button>
                           </div>
                           <div className="tile">
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
@@ -1093,8 +1242,8 @@ export default function App() {
 
         {/* ══ LENDING ══ */}
         {tab === "lending" && (
-          <main key="lending" className="rise">
-            <PageHeader title="Lending" sub="Money lent to friends & family" />
+          <main key="lending" className="page" style={{ "--dir": dir }}>
+            <PageHeader title="Lending" sub="Money lent to friends & family" action={() => openSheet("loan")} actionLabel="New loan" />
 
             <section className="card card--flush" style={{ marginBottom: 16 }}>
               <div className="stat-strip">
@@ -1106,34 +1255,9 @@ export default function App() {
 
             <div className="split">
               <div className="stack-v">
-                <section className="card">
+                <section className="card desktop-only">
                   <div className="card__head"><div className="card__title">New loan</div></div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                    <label className="field">
-                      <span className="field__label">Person</span>
-                      <input className="input" placeholder="Name" value={lName} onChange={e => setLName(e.target.value)} />
-                    </label>
-                    <div className="form-row">
-                      <label className="field">
-                        <span className="field__label">Amount</span>
-                        <span className="input-wrap">
-                          <span className="input-prefix">₹</span>
-                          <input className="input num" type="number" inputMode="decimal" placeholder="0.00" value={lAmt} onChange={e => setLAmt(e.target.value)} />
-                        </span>
-                      </label>
-                      <div className="field">
-                        <span className="field__label">Date</span>
-                        <FinDateSelector value={lDate} onChange={setLDate} label="Loan date" />
-                      </div>
-                    </div>
-                    <label className="field">
-                      <span className="field__label">Note <span style={{ color: "var(--text-3)", fontWeight: 500 }}>(optional)</span></span>
-                      <input className="input" placeholder="What was it for?" value={lNote} onChange={e => setLNote(e.target.value)} />
-                    </label>
-                    <button className="btn btn--primary btn--block" onClick={addLoan} disabled={!lName.trim() || !lAmt || parseFloat(lAmt) <= 0}>
-                      <Icon name="plus" size={16} /> Record loan
-                    </button>
-                  </div>
+                  {loanForm}
                 </section>
 
                 <section className="card">
@@ -1187,7 +1311,7 @@ export default function App() {
                             </span>
                             <button className="btn btn--accent btn--sm" style={{ height: 40 }} onClick={submit} disabled={!(parseFloat(amt) > 0)}>Repay</button>
                           </div>
-                          <button className="btn btn--outline btn--sm btn--block" onClick={() => markLoanRepaid(l.id)}><Icon name="check" size={15} /> Mark fully repaid</button>
+                          <button className="btn btn--outline btn--sm btn--block" onClick={() => { haptic(12); markLoanRepaid(l.id); notify(`${l.name} marked as repaid`); }}><Icon name="check" size={15} /> Mark fully repaid</button>
                         </article>
                       );
                     })}
@@ -1200,7 +1324,7 @@ export default function App() {
 
         {/* ══ HISTORY ══ */}
         {tab === "history" && (
-          <main key="history" className="rise">
+          <main key="history" className="page" style={{ "--dir": dir }}>
             <PageHeader title="History" sub="Month-by-month breakdown and statements" />
 
             <section className="card" style={{ marginBottom: 16 }}>
@@ -1292,25 +1416,108 @@ export default function App() {
       {/* Bottom pill nav (small screens) */}
       <nav className="bottom-nav" aria-label="Primary">
         {TABS.map(({ id, label, icon }) => (
-          <button key={id} className="bottom-nav__item" aria-current={tab === id ? "page" : undefined} aria-label={label} title={label} onClick={() => go(id)}>
+          <button key={id} className="bottom-nav__item" aria-current={tab === id ? "page" : undefined} aria-label={label} onClick={() => go(id)}>
             <Icon name={icon} size={20} />
+            <span className="bottom-nav__label" aria-hidden="true">{id === "dashboard" ? "Home" : label}</span>
           </button>
         ))}
       </nav>
+
+      <Sheet open={!!sheet} onClose={closeSheet} title={SHEETS[sheet]?.title}>
+        {SHEETS[sheet]?.body}
+      </Sheet>
+
+      {toast && createPortal(
+        <div key={toast.id} className={`toast${toast.tone === "neg" ? " toast--neg" : ""}`} role="status" aria-live="polite">
+          <span className="toast__icon"><Icon name={toast.tone === "neg" ? "alert" : "check"} size={14} stroke={2.6} /></span>
+          {toast.msg}
+        </div>, document.body)}
     </>
   );
 }
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
 
-function PageHeader({ title, sub }) {
+function PageHeader({ title, sub, action, actionLabel }) {
   return (
-    <div className="page-head">
-      <div>
+    <div className="page-head" style={{ flexWrap: "nowrap", alignItems: "center" }}>
+      <div style={{ minWidth: 0 }}>
         <h1 className="page-title">{title}</h1>
         {sub && <p className="page-sub">{sub}</p>}
       </div>
+      {action && createPortal(
+        <button className="fab mobile-only" onClick={action}>
+          <span className="fab__icon"><Icon name="plus" size={18} stroke={2.6} /></span>
+          {actionLabel}
+        </button>,
+        document.body
+      )}
     </div>
+  );
+}
+
+// Bottom sheet on phones (dialog on wider screens). Drag the grabber down, tap the backdrop,
+// press Escape or use the back gesture to dismiss.
+function Sheet({ open, onClose, title, children }) {
+  const [mounted, setMounted] = useState(open);
+  const [closing, setClosing] = useState(false);
+  const [drag, setDrag] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef(null);
+
+  // Keep it mounted through the exit animation
+  if (open && !mounted) { setMounted(true); setClosing(false); }
+  if (open && closing) setClosing(false);
+  if (!open && mounted && !closing) setClosing(true);
+
+  useEffect(() => {
+    if (!closing) return;
+    const t = setTimeout(() => { setMounted(false); setClosing(false); setDrag(0); }, 230);
+    return () => clearTimeout(t);
+  }, [closing]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = prev; document.removeEventListener("keydown", onKey); };
+  }, [mounted, onClose]);
+
+  if (!mounted) return null;
+
+  const onDown = (e) => {
+    if (e.pointerType !== "touch") return;
+    dragStart.current = e.clientY;
+    setDragging(true);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onMove = (e) => { if (dragStart.current !== null) setDrag(Math.max(0, e.clientY - dragStart.current)); };
+  const onUp = () => {
+    if (dragStart.current === null) return;
+    dragStart.current = null;
+    setDragging(false);
+    if (drag > 110) { setDrag(window.innerHeight); onClose(); }
+    else setDrag(0);
+  };
+
+  return createPortal(
+    <>
+      <div className="sheet-backdrop" data-closing={closing} onClick={onClose} />
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={title} data-closing={closing && drag === 0}
+        style={drag > 0 || dragging ? { transform: `translateY(${drag}px)`, transition: dragging ? "none" : "transform .25s var(--ease-out)", animation: "none" } : undefined}>
+        <div className="sheet__grab" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+          <div className="sheet__handle" />
+          <div className="sheet__head">
+            <div className="sheet__title">{title}</div>
+            <button className="icon-btn" onClick={onClose} onPointerDown={e => e.stopPropagation()} aria-label="Close"><Icon name="plus" size={18} style={{ transform: "rotate(45deg)" }} /></button>
+          </div>
+        </div>
+        <div className="sheet__body">{children}</div>
+      </div>
+    </>,
+    document.body
   );
 }
 
@@ -1349,8 +1556,38 @@ function Segmented({ options, value, onChange, label }) {
 
 function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive, plain, amountClass, onDelete, deleteLabel }) {
   const sign = plain ? "" : positive ? "+" : "−";
-  return (
-    <div className="row">
+  // Touch: swipe left to reveal Delete; a long swipe deletes straight away
+  const [x, setX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const start = useRef(null);
+
+  const onPointerDown = (e) => {
+    if (!onDelete || e.pointerType !== "touch") return;
+    start.current = { x: e.clientX, y: e.clientY, base: x, axis: null };
+  };
+  const onPointerMove = (e) => {
+    const s = start.current;
+    if (!s) return;
+    const dx = e.clientX - s.x, dy = e.clientY - s.y;
+    if (!s.axis) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      s.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      if (s.axis === "x") setDragging(true);
+    }
+    if (s.axis === "x") setX(Math.max(-180, Math.min(0, s.base + dx)));
+  };
+  const onPointerEnd = () => {
+    const s = start.current;
+    start.current = null;
+    if (!s || s.axis !== "x") { if (s && !s.axis && x < 0) setX(0); return; }
+    setDragging(false);
+    if (x < -150) { setX(0); onDelete(); }
+    else setX(x < -44 ? -88 : 0);
+  };
+
+  const row = (
+    <div className="row" style={onDelete ? { transform: `translateX(${x}px)` } : undefined}
+      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}>
       <span className={`row__icon ${iconClass}`} style={iconColor ? { color: iconColor } : undefined}><Icon name={icon} size={18} /></span>
       <div className="row__body">
         <div className="row__title">{title}</div>
@@ -1364,6 +1601,16 @@ function TxRow({ icon, iconClass = "", iconColor, title, meta, amount, positive,
           <Icon name="trash" size={16} />
         </button>
       )}
+    </div>
+  );
+
+  if (!onDelete) return row;
+  return (
+    <div className="swipe" data-dragging={dragging} data-open={x < 0}>
+      <button className="swipe__action" onClick={() => { setX(0); onDelete(); }} aria-label={deleteLabel} tabIndex={x < 0 ? 0 : -1} aria-hidden={x === 0}>
+        <Icon name="trash" size={18} />Delete
+      </button>
+      {row}
     </div>
   );
 }
@@ -1467,6 +1714,7 @@ function FinDateSelector({ value, onChange, label = "Date" }) {
         <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
       </button>
 
+      {open && <div className="datepick__backdrop" onClick={() => setOpen(false)} />}
       {open && (
         <div className="datepick__pop" role="dialog" aria-label={label}>
           <div className="datepick__head">

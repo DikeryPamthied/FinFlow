@@ -145,4 +145,28 @@ Formatting is always `en-IN` INR through `currency()`, which uses lakh grouping 
 - **Hover:** surfaces step one level (`--surface-2` → `--surface-3`). The primary button lightens to `--ink-3`. Press scales to 0.97.
 - **Focus:** `:focus-visible` shows a 2px ink outline (lime on ink surfaces). Inputs get an ink border plus a soft ring.
 - **States:** `:disabled` drops to 38% opacity. Loading uses `.spinner`. Errors and success messages use `.alert--neg` / `.alert--pos` with an icon.
-- **Accessibility:** `aria-current="page"` on nav items, `aria-pressed` on toggles, `aria-expanded` on accordions and the date picker, and labelled icon-only buttons. Touch targets are at least 36px (46px in the bottom nav).
+- **Accessibility:** `aria-current="page"` on nav items, `aria-pressed` on toggles, `aria-expanded` on accordions and the date picker, and labelled icon-only buttons. Touch targets are at least 36px (48px in the bottom nav).
+
+---
+
+## 8. Mobile and app behaviour
+
+On screens up to 960px wide, FinFlow behaves like an installed phone app rather than a web page.
+
+- **Installable:** `public/manifest.webmanifest` and the icons in `public/` let it be added to the home screen. It then opens full-screen with no browser bar and respects the notch and home-bar safe areas (`--safe-*` tokens).
+- **Navigation:**
+  - The floating ink bottom nav expands the active tab into a labelled pill.
+  - Tabs are kept in the URL hash, so the phone's back gesture moves between tabs.
+  - Each tab remembers its scroll position, and re-tapping the active tab scrolls to the top.
+  - Pages slide in from the direction of travel (`.page`, `--dir`).
+- **App bar:** sticky and translucent. When you scroll, the brand swaps for the page title.
+- **Adding things:** on phones, forms open in a **bottom sheet** (`<Sheet>`). Open one from the hero's quick actions or the floating lime "Add expense / New goal / New loan" button above the nav (`.fab`, rendered by `PageHeader action`). Dismiss it by dragging the grabber down, tapping the backdrop or using back. On desktop the same forms stay inline.
+- **Deleting:** swipe a transaction row left to reveal Delete; a long swipe deletes it straight away. The hover trash icon is used on mouse devices only.
+- **Feedback:** every add and delete shows a toast (`notify()`), plus a short vibration where the phone supports it (`haptic()`).
+- **Touch polish:**
+  - Pressed states replace hover.
+  - No tap-highlight flash and no double-tap zoom.
+  - Inputs are 16px, so iOS doesn't zoom into them.
+  - The bottom nav hides while the keyboard is open.
+  - The date picker becomes a bottom sheet.
+  - The installed app has no pull-to-refresh bounce.
