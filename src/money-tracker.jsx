@@ -238,12 +238,73 @@ function Auth() {
   );
 }
 
-// ─── Loading Screen ───────────────────────────────────────────────────────────
-function LoadingScreen() {
+// ─── Launch splash ────────────────────────────────────────────────────────────
+// The maker's signature plays centre-screen while data loads, glides down to its resting place
+// at the bottom, and only then does the app rise in around it.
+const SPLASH_MIN_MS = 1450; // long enough for the letters to settle and the dot to land
+const SPLASH_MOVE_MS = 850;
+const SPLASH_REVEAL_MS = 600; // keep in step with the app-in animation in index.css
+
+function Splash({ ready, onReveal, onDone }) {
+  const markRef = useRef(null);
+  const bgRef = useRef(null);
+  const cb = useRef({ onReveal, onDone });
+  const [minDone, setMinDone] = useState(false);
+
+  useEffect(() => { cb.current = { onReveal, onDone }; });
+
+  useEffect(() => {
+    const t = setTimeout(() => setMinDone(true), SPLASH_MIN_MS);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!ready || !minDone) return;
+    const anims = [];
+    const finish = () => { cb.current.onReveal(); cb.current.onDone(); };
+    // Safety net: never leave the splash up, even where animations are paused (background tabs)
+    const fallback = setTimeout(finish, SPLASH_MOVE_MS + SPLASH_REVEAL_MS + 900);
+    // Give the (still hidden) page a moment to lay out before measuring the footer
+    const measure = setTimeout(() => {
+      const mark = markRef.current;
+      const target = document.querySelector(".credit .sig");
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (!mark || !target || reduce || !mark.animate) { finish(); return; }
+
+      // Land on the footer signature; if that's below the fold, land at the bottom of the
+      // screen instead (above the bottom nav on phones) and fade out as the app appears.
+      const from = mark.getBoundingClientRect();
+      const to = target.getBoundingClientRect();
+      const restY = window.innerHeight - (window.matchMedia(MOBILE_MQ).matches ? 132 : 56);
+      const toY = to.top + to.height / 2;
+      const offscreen = toY > restY;
+      const dx = to.left + to.width / 2 - (from.left + from.width / 2);
+      const dy = (offscreen ? restY : toY) - (from.top + from.height / 2);
+      const landed = `translate(${dx}px, ${dy}px) scale(1)`;
+
+      const move = mark.animate(
+        [{ transform: "scale(1.6)" }, { transform: landed }],
+        { duration: SPLASH_MOVE_MS, easing: "cubic-bezier(.65, 0, .35, 1)", fill: "forwards" }
+      );
+      anims.push(move);
+      move.onfinish = () => {
+        cb.current.onReveal();
+        const reveal = { duration: SPLASH_REVEAL_MS, easing: "cubic-bezier(.22, 1, .36, 1)", fill: "forwards" };
+        const bg = bgRef.current.animate([{ opacity: 1 }, { opacity: 0 }], reveal);
+        anims.push(bg);
+        if (offscreen) anims.push(mark.animate([{ transform: landed, opacity: 1 }, { transform: `translate(${dx}px, ${dy + 10}px) scale(1)`, opacity: 0 }], reveal));
+        bg.onfinish = () => cb.current.onDone();
+      };
+    }, 40);
+    return () => { clearTimeout(measure); clearTimeout(fallback); anims.forEach(a => a.cancel()); };
+  }, [ready, minDone]);
+
   return (
-    <div className="loading">
-      <LogoMark size={44} />
-      <span style={{ display: "flex", alignItems: "center", gap: 10 }}><span className="spinner" style={{ width: 14, height: 14 }} /> Loading your finances…</span>
+    <div className="splash" role="status" aria-label="Loading your finances">
+      <div className="splash__bg" ref={bgRef} />
+      <div className="splash__mark" ref={markRef}>
+        <Signature lead="Built by" name="Kery" autoplay />
+      </div>
     </div>
   );
 }
@@ -252,6 +313,8 @@ function LoadingScreen() {
 export default function App() {
   const [session, setSession] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [splashPhase, setSplashPhase] = useState("show"); // show → reveal → done
   const [salaryEntries, setSalaryEntries] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [goals, setGoals] = useState(() => readLocalArray('finflow_goals'));
@@ -354,9 +417,18 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // Lets CSS hold the app hidden while the splash plays, then rise it in on reveal
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    document.documentElement.dataset.splash = splashPhase;
+  }, [splashPhase]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setAuthChecked(true); });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      // Signed out: the next sign-in loads fresh data behind the splash again
+      if (!session) { setLoaded(false); setSplashPhase("show"); }
+    });
     return () => subscription.unsubscribe();
   }, []);
 
@@ -609,8 +681,11 @@ export default function App() {
     return { list, total: sum(list, e => e.amount) };
   }, [expenses, eQuery, eFilter, eSort]);
 
-  if (!session) return <Auth />;
-  if (!loaded) return <LoadingScreen />;
+  if (authChecked && !session) return <Auth />;
+  const splash = splashPhase !== "done" && (
+    <Splash key="splash" ready={loaded} onReveal={() => setSplashPhase(p => (p === "show" ? "reveal" : p))} onDone={() => setSplashPhase("done")} />
+  );
+  if (!loaded) return <>{splash}</>;
 
   const TABS = [
     { id: "dashboard", label: "Dashboard", icon: "grid" },
@@ -828,6 +903,7 @@ export default function App() {
 
   return (
     <>
+      {splash}
       <div className="shell">
         {/* ── Top bar ── */}
         <header className="topbar" data-scrolled={scrolled}>
@@ -1411,6 +1487,10 @@ export default function App() {
             )}
           </main>
         )}
+
+        <footer className="credit" data-waiting={splashPhase !== "done"}>
+          <Signature lead="Built by" name="Kery" />
+        </footer>
       </div>
 
       {/* Bottom pill nav (small screens) */}
@@ -1522,6 +1602,53 @@ function Sheet({ open, onClose, title, children }) {
 }
 
 // Currency with de-emphasised decimals: ₹1,23,456<span>.78</span>
+// Maker's signature: each letter flickers through typefaces, then settles one by one.
+// Plays on mount when `autoplay` (the launch splash), otherwise starts settled; hover or tap replays it.
+const SIG_FACES = 7;
+function Signature({ lead, name, autoplay = false }) {
+  const [run, setRun] = useState(autoplay ? 1 : 0);
+  const [faces, setFaces] = useState(() => [...name].map(() => (autoplay ? "idle" : "final")));
+  const [settled, setSettled] = useState(!autoplay);
+
+  useEffect(() => {
+    if (!run || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const start = performance.now();
+    let last = [];
+    const id = setInterval(() => {
+      const t = performance.now() - start;
+      const next = [...name].map((_, i) => {
+        if (t >= 520 + i * 150) return "final";
+        let f; // never repeat the previous face, so every tick visibly changes
+        do { f = Math.floor(Math.random() * SIG_FACES); } while (f === last[i]);
+        return f;
+      });
+      last = next;
+      setFaces(next);
+      const done = next.every(f => f === "final");
+      setSettled(done);
+      if (done) clearInterval(id);
+    }, 60);
+    return () => clearInterval(id);
+  }, [run, name]);
+
+  const replay = () => { setSettled(false); setRun(r => r + 1); };
+
+  return (
+    <span className="sig" data-settled={settled} onMouseEnter={replay} onClick={replay} role="img" aria-label={`${lead} ${name}`}>
+      <span className="sig__lead" aria-hidden="true">{lead}</span>
+      <span className="sig__name" aria-hidden="true">
+        {[...name].map((ch, i) => (
+          <span key={i} className="sig__cell">
+            <span className="sig__size">{ch}</span>
+            <span className={`sig__glyph sig__glyph--${faces[i]}`}>{ch}</span>
+          </span>
+        ))}
+        <span className="sig__dot" />
+      </span>
+    </span>
+  );
+}
+
 function Money({ value, className = "", style }) {
   const s = currency(value);
   const i = s.lastIndexOf(".");
