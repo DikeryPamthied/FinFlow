@@ -1277,8 +1277,15 @@ img, svg { -webkit-user-drag: none; }
   font-size: 15px;
   font-weight: 700;
   box-shadow: 0 10px 24px -8px rgba(18, 19, 22, .45), 0 2px 6px rgba(18, 19, 22, .12);
-  animation: fab-in .35s var(--ease-out) both;
-  transition: transform 90ms var(--ease), opacity var(--t), visibility var(--t);
+  animation: fab-in .35s var(--ease-out) backwards; /* backwards, so the hide transform below still applies afterwards */
+  transition: transform .3s var(--ease-out), opacity .25s var(--ease-out), visibility .25s;
+}
+
+html[data-scroll-dir="down"] .fab {
+  transform: translateY(24px) scale(.9);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .fab__icon {
@@ -1291,7 +1298,7 @@ img, svg { -webkit-user-drag: none; }
   place-items: center;
 }
 
-.fab:active { transform: scale(.95); }
+.fab:active { transform: scale(.95); transition-duration: 90ms; }
 .kb-open .fab { opacity: 0; visibility: hidden; pointer-events: none; }
 
 /* ── Bottom sheet (dialog on desktop) ── */
@@ -1589,3 +1596,54 @@ html[data-splash="show"] .fab { opacity: 0; }
 html[data-splash="reveal"] .shell { animation: app-in .6s cubic-bezier(.22, 1, .36, 1) both; }
 html[data-splash="reveal"] .bottom-nav,
 html[data-splash="reveal"] .fab { animation: app-fade-in .6s cubic-bezier(.22, 1, .36, 1) both; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Budget plan
+   ════════════════════════════════════════════════════════════════════════════ */
+.input-wrap > .input-suffix { position: absolute; right: 14px; color: var(--text-3); pointer-events: none; font-weight: 600; }
+.input-wrap > .input--pct { padding-left: 14px; padding-right: 34px; }
+
+/* Dashboard prompt to set up a plan */
+.plan-prompt { display: flex; align-items: center; gap: 14px; }
+@media (max-width: 600px) {
+  .plan-prompt { flex-wrap: wrap; }
+  .plan-prompt .btn { width: 100%; }
+}
+
+/* Large figures in half-width tiles shrink on narrow phones instead of overflowing */
+@media (max-width: 420px) {
+  .money--fit { font-size: 18px; line-height: 24px; }
+}
+
+/* Need / want label on expense rows; tap to switch */
+.kind-pill {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.kind-pill[data-kind="need"] { background: var(--ink); color: var(--text-on-ink); }
+button.kind-pill { cursor: pointer; transition: transform 90ms var(--ease), background var(--t) var(--ease); }
+button.kind-pill:active { transform: scale(.92); }
+
+/* Needs / wants limit bars (Expenses page) */
+.budget-bars { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-6); }
+@media (max-width: 720px) { .budget-bars { grid-template-columns: 1fr; gap: var(--s-5); } }
+
+.budget-bar { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.budget-bar__top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.budget-bar__label { font-size: 14px; font-weight: 700; color: var(--text); }
+.budget-bar__left { display: inline-flex; align-items: baseline; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-3); }
+.budget-bar[data-over="true"] .budget-bar__left { color: var(--neg); }
+.budget-bar[data-over="true"] .budget-bar__left .money { color: var(--neg); }
+
+.budget-bar__track { position: relative; height: 14px; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }
+.budget-bar__fill { position: absolute; inset: 0 auto 0 0; min-width: 14px; border-radius: inherit; transition: width .6s var(--ease); }
+
+.budget-bar__foot { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-3); }
+.budget-bar__foot b { color: var(--text); font-weight: 700; }
