@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie } from 'recharts';
 import jsPDF from 'jspdf';
-import 'jspdf-autotable';
+import { autoTable } from 'jspdf-autotable'; // v5: called as autoTable(doc, …), no longer patched onto jsPDF
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 const localToday = () => {
@@ -25,6 +25,7 @@ const dayLabel = (iso) => {
   if (iso === yIso) return "Yesterday";
   return parseLocal(iso).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 };
+const num = (n) => new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
 const currency = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2 }).format(n || 0);
 const compactINR = (n) => "₹" + new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(n || 0);
 const sum = (arr, f) => arr.reduce((s, x) => s + (f(x) || 0), 0);
@@ -717,54 +718,136 @@ export default function App() {
       e = e.filter(x => x.date >= expStart && x.date <= expEnd);
       t = t.filter(x => x.date >= expStart && x.date <= expEnd);
     }
+    const period = expType === "Month" ? monthKeyLabel(expMonth) : expType === "Date Range" ? `${fmtDate(expStart)} – ${fmtDate(expEnd)}` : "All time";
+    const fileBase = `FinFlow_Statement_${expType === "Month" ? expMonth : expType === "Date Range" ? `${expStart}_to_${expEnd}` : "all"}`;
 
-    const rows = [["Date", "Type", "Name/Tag", "Amount", "Allocations"]];
-    s.forEach(x => {
-      const alloc = `${x.tithe > 0 ? `Tithe: ${x.tithe} | ` : ""}To savings: ${x.amount - x.tithe}`;
-      rows.push([x.date, "Income", x.savingsTag === "Extra" ? "Extra" : "Salary", x.amount, alloc]);
-    });
-    e.forEach(x => {
-      rows.push([x.date, "Expense", `${x.name} (${x.tag}, ${x.kind})`, `-${x.amount}`, ""]);
-    });
-    t.forEach(x => {
-      rows.push([x.date, "Moved from savings", `${DESTINATIONS[x.destination]?.label || x.destination}${x.note ? ` (${x.note})` : ""}`, x.amount, ""]);
-    });
+    // One chronological list: income, expenses and money moved out of savings
+    const lines = [
+      ...s.map(x => ({ date: x.date, type: "Income", title: x.savingsTag === "Extra" ? "Extra income" : "Salary", category: "", kind: "",
+        amount: x.amount, note: x.tithe > 0 ? `Tithe ${num(x.tithe)} · ${num(x.amount - x.tithe)} to savings` : "All to savings" })),
+      ...e.map(x => ({ date: x.date, type: "Expense", title: x.name, category: x.tag, kind: x.kind === "need" ? "Need" : "Want", amount: -x.amount, note: "" })),
+      ...t.map(x => ({ date: x.date, type: "Set aside", title: `To ${DESTINATIONS[x.destination]?.label.toLowerCase() || x.destination}`, category: "", kind: "",
+        amount: -x.amount, note: x.note || "" })),
+    ].sort((a, b) => a.date.localeCompare(b.date));
 
-    rows.sort((a, b) => {
-      if (a[0] === "Date") return -1;
-      if (b[0] === "Date") return 1;
-      return b[0].localeCompare(a[0]);
-    });
+    const income = sum(s, x => x.amount), tithe = sum(s, x => x.tithe), spent = sum(e, x => x.amount);
+    const needs = sum(e.filter(x => x.kind === "need"), x => x.amount), wants = spent - needs, setAside = sum(t, x => x.amount);
+    const kept = income - tithe - spent - setAside;
 
     if (format === 'csv') {
-      const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const fix = (n) => (Number(n) || 0).toFixed(2); // plain numbers so spreadsheets can sum them
+      const rows = [
+        ["FinFlow Statement"],
+        ["Period", period],
+        ["Generated", fmtDate(localToday())],
+        ["Account", session.user?.email || ""],
+        [],
+        ["Summary", "Amount (INR)"],
+        ["Income", fix(income)],
+        ["Tithe", fix(tithe)],
+        ["Spent", fix(spent)],
+        ["  Needs", fix(needs)],
+        ["  Wants", fix(wants)],
+        ["Set aside", fix(setAside)],
+        ["Kept in savings", fix(kept)],
+        [],
+        ["Date", "Type", "Description", "Category", "Need / Want", "Amount (INR)", "Details"],
+        ...lines.map(l => [l.date, l.type, l.title, l.category, l.kind, fix(l.amount), l.note]),
+      ];
+      const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+      // BOM so Excel opens it as UTF-8
+      const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
       const link = document.createElement("a");
       const url = URL.createObjectURL(blob);
       link.setAttribute("href", url);
-      link.setAttribute("download", `Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.csv`);
+      link.setAttribute("download", `${fileBase}.csv`);
       link.style.visibility = 'hidden';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      URL.revokeObjectURL(url);
     } else if (format === 'pdf') {
-      const doc = new jsPDF();
-      doc.setFontSize(22);
-      doc.text("FinFlow Statement", 14, 22);
-      doc.setFontSize(11);
-      doc.setTextColor(100);
-      doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 30);
-      doc.text(`Period: ${expType === "Month" ? monthKeyLabel(expMonth) : `${fmtDate(expStart)} to ${fmtDate(expEnd)}`}`, 14, 36);
+      // FinFlow look: ink header card, lime mark, soft summary tiles, airy table.
+      // Built-in PDF fonts have no ₹ glyph, so amounts read "Rs".
+      const INK = [18, 19, 22], LIME = [210, 242, 75], SURFACE2 = [244, 245, 247], DIVIDER = [238, 240, 242];
+      const TEXT2 = [91, 95, 103], TEXT3 = [141, 145, 153], ON_INK2 = [154, 158, 166], POS = [43, 138, 62];
+      const rs = (n) => `${n < 0 ? "-" : ""}Rs ${num(Math.abs(n))}`;
+      const doc = new jsPDF({ unit: "mm", format: "a4" });
+      const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 14;
 
-      doc.autoTable({
-        startY: 42,
-        head: [rows[0]],
-        body: rows.slice(1),
-        theme: 'grid',
-        headStyles: { fillColor: [18, 19, 22], textColor: [210, 242, 75] },
-        styles: { fontSize: 9 }
+      // Header card
+      doc.setFillColor(...INK);
+      doc.roundedRect(M, M, W - M * 2, 40, 5, 5, "F");
+      doc.setFillColor(...LIME);
+      doc.roundedRect(M + 8, M + 8, 11, 11, 2.5, 2.5, "F");
+      doc.setFillColor(...INK);
+      [[2.6, 4], [5.2, 6], [7.8, 2.5]].forEach(([x, h]) => doc.roundedRect(M + 8 + x, M + 8 + 8.5 - h, 1.3, h, 0.6, 0.6, "F"));
+      doc.setFont("helvetica", "bold").setFontSize(15).setTextColor(255, 255, 255);
+      doc.text("FinFlow", M + 23, M + 15.8);
+      doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...ON_INK2);
+      doc.text("STATEMENT", W - M - 8, M + 11, { align: "right" });
+      doc.setFont("helvetica", "bold").setFontSize(14).setTextColor(255, 255, 255);
+      doc.text(period, W - M - 8, M + 18, { align: "right" });
+      doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...ON_INK2);
+      doc.text(session.user?.email || "", M + 8, M + 32);
+      doc.text(`Generated ${fmtDate(localToday())}`, W - M - 8, M + 32, { align: "right" });
+
+      // Summary tiles
+      const tiles = [["Income", income, POS], ["Spent", spent, INK], ["Set aside", setAside, INK], ["Kept in savings", kept, kept < 0 ? [207, 61, 54] : INK]];
+      const gap = 4, tw = (W - M * 2 - gap * 3) / 4, ty = M + 46;
+      tiles.forEach(([label, val, col], i) => {
+        const x = M + i * (tw + gap);
+        doc.setFillColor(...SURFACE2);
+        doc.roundedRect(x, ty, tw, 21, 3.5, 3.5, "F");
+        doc.setFont("helvetica", "normal").setFontSize(7.5).setTextColor(...TEXT3);
+        doc.text(label.toUpperCase(), x + 5, ty + 7.5);
+        doc.setFont("helvetica", "bold").setFontSize(11.5).setTextColor(...col);
+        doc.text(rs(val), x + 5, ty + 15.5);
       });
-      doc.save(`Statement_${expType === "Month" ? expMonth : expStart + "_to_" + expEnd}.pdf`);
+      doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...TEXT2);
+      doc.text(`Tithe ${rs(tithe)}   ·   Needs ${rs(needs)}   ·   Wants ${rs(wants)}`, M, ty + 29);
+
+      // Transactions
+      doc.setFont("helvetica", "bold").setFontSize(11).setTextColor(...INK);
+      doc.text("Transactions", M, ty + 40);
+      doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...TEXT3);
+      doc.text(`${lines.length} ${lines.length === 1 ? "entry" : "entries"}`, W - M, ty + 40, { align: "right" });
+
+      if (lines.length === 0) {
+        doc.setFillColor(...SURFACE2);
+        doc.roundedRect(M, ty + 45, W - M * 2, 20, 3.5, 3.5, "F");
+        doc.setFontSize(9.5).setTextColor(...TEXT2);
+        doc.text("No transactions in this period.", W / 2, ty + 56.5, { align: "center" });
+      } else {
+        autoTable(doc, {
+          startY: ty + 44,
+          margin: { left: M, right: M, bottom: 20 },
+          head: [["Date", "Type", "Description", "Category", "Amount"]],
+          body: lines.map(l => [fmtDate(l.date), l.type, l.note ? `${l.title}\n${l.note}` : l.title, [l.category, l.kind].filter(Boolean).join(" · "), l.type === "Income" ? `+${rs(l.amount)}` : rs(l.amount)]),
+          theme: "plain",
+          styles: { font: "helvetica", fontSize: 8.5, textColor: INK, cellPadding: { top: 3.2, bottom: 3.2, left: 3, right: 3 }, lineColor: DIVIDER, lineWidth: { bottom: 0.25 }, valign: "middle" },
+          headStyles: { fillColor: INK, textColor: [255, 255, 255], fontStyle: "bold", fontSize: 8, lineWidth: 0 },
+          columnStyles: { 0: { cellWidth: 26, textColor: TEXT2 }, 1: { cellWidth: 20 }, 3: { cellWidth: 38, textColor: TEXT2 }, 4: { cellWidth: 32, halign: "right", fontStyle: "bold" } },
+          didParseCell: (d) => {
+            if (d.section === "head" && d.column.index === 4) d.cell.styles.halign = "right";
+            if (d.section !== "body") return;
+            const l = lines[d.row.index];
+            if (d.column.index === 1) d.cell.styles.textColor = l.type === "Income" ? POS : l.type === "Set aside" ? TEXT3 : INK;
+            if (d.column.index === 4) d.cell.styles.textColor = l.type === "Income" ? POS : l.type === "Set aside" ? TEXT2 : INK;
+          },
+        });
+      }
+
+      // Footer on every page
+      const pages = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= pages; i++) {
+        doc.setPage(i);
+        doc.setDrawColor(...DIVIDER).setLineWidth(0.3).line(M, H - 13, W - M, H - 13);
+        doc.setFont("helvetica", "normal").setFontSize(7.5).setTextColor(...TEXT3);
+        doc.text("FinFlow · Built by Kery.", M, H - 8);
+        doc.text(`Page ${i} of ${pages}`, W - M, H - 8, { align: "right" });
+      }
+      doc.save(`${fileBase}.pdf`);
     }
   };
 
