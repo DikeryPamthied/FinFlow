@@ -73,16 +73,26 @@ const haptic = (ms = 8) => { try { navigator.vibrate?.(ms); } catch { /* unsuppo
 const GOAL_COLORS =["var(--c-ink)", "var(--c-lime)", "var(--c-blue)", "var(--c-orange)", "var(--c-green)", "var(--c-rose)"];
 
 // ─── Supabase helpers ─────────────────────────────────────────────────────────
-async function loadData() {
+// Overlapping loads (an auth event right after start-up) share one request, so the one-time upload below runs once
+let loadingData = null;
+const loadData = () => (loadingData ??= fetchData().finally(() => { loadingData = null; }));
+
+async function fetchData() {
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { salaryEntries: [], expenses: [], transfers: [], plan: DEFAULT_PLAN, schemaReady: true };
-  const [salRes, expRes, planRes, trRes] = await Promise.all([
+  if (!user) return { salaryEntries: [], expenses: [], transfers: [], plan: DEFAULT_PLAN, schemaReady: true, goals: [], loans: [], listsReady: false };
+  const [salRes, expRes, planRes, trRes, goalRes, loanRes] = await Promise.all([
     supabase.from('salary_entries').select('*').eq('user_id', user.id).order('date', { ascending: false }),
     supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false }),
     supabase.from('budget_settings').select('*').eq('user_id', user.id).maybeSingle(),
     supabase.from('savings_transfers').select('*').eq('user_id', user.id).order('date', { ascending: false }),
+    supabase.from('goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+    supabase.from('loans').select('*').eq('user_id', user.id).order('date', { ascending: false }),
   ]);
   const p = planRes.data;
+  // Goals and loans live in the database once supabase/goals_loans_setup.sql has been run; until then they stay in this browser
+  const listsReady = !goalRes.error && !loanRes.error;
+  let goals = goalRes.data || [], loans = loanRes.data || [];
+  if (listsReady) [goals, loans] = await uploadLocalLists(user.id, goals, loans);
   return {
     salaryEntries: salRes.data?.map(s => ({ ...s, amount: parseFloat(s.amount), tithe: parseFloat(s.tithe) || 0, wantsAlloc: parseFloat(s.wants_alloc) || 0, savingsAlloc: parseFloat(s.savings_alloc) || 0, savingsTag: s.savings_tag })) || [],
     expenses: expRes.data?.map(e => ({ ...e, amount: parseFloat(e.amount), kind: e.kind === "need" ? "need" : "want" })) || [],
@@ -90,7 +100,38 @@ async function loadData() {
     plan: p ? { titheOn: p.tithe_on, tithePct: parseFloat(p.tithe_pct), needsPct: parseFloat(p.needs_pct), wantsPct: parseFloat(p.wants_pct), saved: true } : DEFAULT_PLAN,
     // The budget tables come from supabase/budget_setup.sql; until it has been run, saving plans and moves is unavailable
     schemaReady: !planRes.error && !trRes.error,
+    goals: listsReady ? goals.map(toGoal) : readLocalArray('finflow_goals'),
+    loans: listsReady ? loans.map(toLoan) : readLocalArray('finflow_loans'),
+    listsReady,
   };
+}
+
+const toGoal = (g) => ({ ...g, target_amount: parseFloat(g.target_amount), current_amount: parseFloat(g.current_amount) || 0 });
+const toLoan = (l) => ({ ...l, amount: parseFloat(l.amount), repaid_amount: parseFloat(l.repaid_amount) || 0 });
+const isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v || "");
+
+// One-time move of goals and loans that older versions kept only in this browser. Anything already in the
+// database (same id) is skipped; the browser copy is cleared once the upload succeeds.
+async function uploadLocalLists(userId, goals, loans) {
+  const lists = [
+    { key: 'finflow_goals', table: 'goals', rows: goals, pick: g => ({ name: g.name, target_amount: g.target_amount, current_amount: g.current_amount || 0, color: g.color || null }) },
+    { key: 'finflow_loans', table: 'loans', rows: loans, pick: l => ({ name: l.name, amount: l.amount, repaid_amount: l.repaid_amount || 0, date: l.date, note: l.note || null, status: l.status === 'repaid' ? 'repaid' : 'pending' }) },
+  ];
+  const out = [];
+  for (const { key, table, rows, pick } of lists) {
+    // Give every browser item a fixed uuid first, so two loads racing each other upsert the same rows instead of duplicating
+    const stored = readLocalArray(key).filter(r => r && r.name).map(r => (isUuid(r.id) ? r : { ...r, id: crypto.randomUUID() }));
+    localStorage.setItem(key, JSON.stringify(stored));
+    const have = new Set(rows.map(r => r.id));
+    const local = stored.filter(r => !have.has(r.id));
+    if (local.length === 0) { localStorage.removeItem(key); out.push(rows); continue; }
+    const { data, error } = await supabase.from(table).upsert(local.map(r => ({ ...pick(r), id: r.id, user_id: userId }))).select();
+    if (error) { out.push(rows); continue; } // keep the browser copy and try again next time
+    localStorage.removeItem(key);
+    const merged = [...(data || []), ...rows];
+    out.push(merged.filter((r, i) => merged.findIndex(x => x.id === r.id) === i));
+  }
+  return out;
 }
 
 // Savings = income − tithe − spending − everything moved to the emergency fund or investments
@@ -350,8 +391,9 @@ export default function App() {
   const [transfers, setTransfers] = useState([]);
   const [plan, setPlan] = useState(DEFAULT_PLAN);
   const [schemaReady, setSchemaReady] = useState(true);
-  const [goals, setGoals] = useState(() => readLocalArray('finflow_goals'));
-  const [loans, setLoans] = useState(() => readLocalArray('finflow_loans'));
+  const [goals, setGoals] = useState([]);
+  const [loans, setLoans] = useState([]);
+  const [listsReady, setListsReady] = useState(true);
   const [tab, setTab] = useState(tabFromHash);
   const [openMonth, setOpenMonth] = useState(null);
 
@@ -487,18 +529,20 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Only until supabase/goals_loans_setup.sql has been run: keep goals and loans in this browser
   useEffect(() => {
-    if (loaded) {
+    if (loaded && !listsReady) {
       localStorage.setItem('finflow_goals', JSON.stringify(goals));
       localStorage.setItem('finflow_loans', JSON.stringify(loans));
     }
-  }, [goals, loans, loaded]);
+  }, [goals, loans, loaded, listsReady]);
 
   useEffect(() => {
     if (!session) return;
     loadData().then(data => {
       setSalaryEntries(data.salaryEntries); setExpenses(data.expenses); setTransfers(data.transfers);
-      setPlan(data.plan); setSchemaReady(data.schemaReady); setLoaded(true);
+      setPlan(data.plan); setSchemaReady(data.schemaReady);
+      setGoals(data.goals); setLoans(data.loans); setListsReady(data.listsReady); setLoaded(true);
     });
   }, [session]);
 
@@ -658,53 +702,69 @@ export default function App() {
     return true;
   };
 
-  const addGoal = () => {
+  // Goals and loans: saved to the database (or, before the setup script is run, to this browser). Each returns true on success.
+  const saveRow = async (table, op) => {
+    if (!listsReady) return { ok: true };
+    const { data, error } = await op(supabase.from(table));
+    return { ok: !error, data };
+  };
+
+  const addGoal = async () => {
     const target = parseFloat(gTarget);
-    if (!target || target <= 0 || !gName.trim()) return;
-    const newGoal = { id: crypto.randomUUID(), name: gName.trim(), target_amount: target, current_amount: 0, color: gColor };
-    setGoals(prev => [newGoal, ...prev]);
+    if (!target || target <= 0 || !gName.trim()) return false;
+    const row = { name: gName.trim(), target_amount: target, current_amount: 0, color: gColor };
+    const res = await saveRow('goals', q => q.insert(row).select().single());
+    if (!res.ok) return false;
+    setGoals(prev => [res.data ? toGoal(res.data) : { ...row, id: crypto.randomUUID() }, ...prev]);
     setGName(""); setGTarget("");
     return true;
   };
 
-  const delGoal = (id) => {
-    setGoals(prev => prev.filter(e => e.id !== id));
+  const delGoal = async (id) => {
+    const res = await saveRow('goals', q => q.delete().eq('id', id));
+    if (res.ok) setGoals(prev => prev.filter(e => e.id !== id));
+    return res.ok;
   };
 
-  const fundGoal = (goal, amtStr) => {
+  const fundGoal = async (goal, amtStr) => {
     const amt = parseFloat(amtStr);
-    if (!amt || amt <= 0) return;
-    setGoals(prev => prev.map(g => g.id === goal.id ? { ...g, current_amount: g.current_amount + amt } : g));
+    if (!amt || amt <= 0) return false;
+    const current_amount = goal.current_amount + amt;
+    const res = await saveRow('goals', q => q.update({ current_amount }).eq('id', goal.id));
+    if (res.ok) setGoals(prev => prev.map(g => g.id === goal.id ? { ...g, current_amount } : g));
+    return res.ok;
   };
 
-  const addLoan = () => {
+  const addLoan = async () => {
     const amount = parseFloat(lAmt);
-    if (!amount || amount <= 0 || !lName.trim()) return;
-    const newLoan = { id: crypto.randomUUID(), name: lName.trim(), amount, repaid_amount: 0, date: lDate, note: lNote, status: 'pending' };
-    setLoans(prev => [newLoan, ...prev]);
+    if (!amount || amount <= 0 || !lName.trim()) return false;
+    const row = { name: lName.trim(), amount, repaid_amount: 0, date: lDate, note: lNote, status: 'pending' };
+    const res = await saveRow('loans', q => q.insert(row).select().single());
+    if (!res.ok) return false;
+    setLoans(prev => [res.data ? toLoan(res.data) : { ...row, id: crypto.randomUUID() }, ...prev]);
     setLName(""); setLAmt(""); setLNote(""); setLDate(localToday());
     return true;
   };
 
-  const markLoanRepaid = (id) => {
-    setLoans(prev => prev.map(l => l.id === id ? { ...l, repaid_amount: l.amount, status: 'repaid' } : l));
+  const updateLoan = async (id, patch) => {
+    const res = await saveRow('loans', q => q.update(patch).eq('id', id));
+    if (res.ok) setLoans(prev => prev.map(l => l.id === id ? { ...l, ...patch } : l));
+    return res.ok;
   };
 
-  const repayLoan = (id, amtStr) => {
+  const markLoanRepaid = (loan) => updateLoan(loan.id, { repaid_amount: loan.amount, status: 'repaid' });
+
+  const repayLoan = (loan, amtStr) => {
     const amt = parseFloat(amtStr);
-    if (!amt || amt <= 0) return;
-    setLoans(prev => prev.map(l => {
-      if (l.id === id) {
-        const newRepaid = (l.repaid_amount || 0) + amt;
-        const newStatus = newRepaid >= l.amount ? 'repaid' : 'pending';
-        return { ...l, repaid_amount: newRepaid, status: newStatus };
-      }
-      return l;
-    }));
+    if (!amt || amt <= 0) return false;
+    const repaid_amount = (loan.repaid_amount || 0) + amt;
+    return updateLoan(loan.id, { repaid_amount, status: repaid_amount >= loan.amount ? 'repaid' : 'pending' });
   };
 
-  const delLoan = (id) => {
-    setLoans(prev => prev.filter(l => l.id !== id));
+  const delLoan = async (id) => {
+    const res = await saveRow('loans', q => q.delete().eq('id', id));
+    if (res.ok) setLoans(prev => prev.filter(l => l.id !== id));
+    return res.ok;
   };
 
   const downloadStatement = (format = 'csv') => {
@@ -903,8 +963,15 @@ export default function App() {
   // Form submit / delete wrappers: same handlers, plus feedback
   const submitIncome = async () => { if (await addSalary()) { haptic(12); notify(isExtra ? "Extra income added" : "Salary recorded"); closeSheet(); } };
   const submitExpense = async () => { if (await addExpense()) { haptic(12); notify("Expense added"); closeSheet(); } };
-  const submitGoal = () => { if (addGoal()) { haptic(12); notify("Goal created"); closeSheet(); } };
-  const submitLoan = () => { if (addLoan()) { haptic(12); notify("Loan recorded"); closeSheet(); } };
+  const submitGoal = async () => { if (await addGoal()) { haptic(12); notify("Goal created"); closeSheet(); } else if (gName.trim() && parseFloat(gTarget) > 0) notify("Couldn't save the goal. Try again.", "neg"); };
+  const listsSetupNote = loaded && !listsReady && (
+    <div className="alert alert--neg" style={{ marginBottom: 16 }}>
+      <Icon name="alert" size={16} />
+      <span>Saved on this device only. Run <b>supabase/goals_loans_setup.sql</b> in your Supabase SQL editor to sync goals and loans across devices.</span>
+    </div>
+  );
+  const removeLoan = async (l) => { haptic(14); if (await delLoan(l.id)) notify(`Loan to ${l.name} deleted`); else notify("Couldn't save. Check your connection and try again.", "neg"); };
+  const submitLoan = async () => { if (await addLoan()) { haptic(12); notify("Loan recorded"); closeSheet(); } else if (lName.trim() && parseFloat(lAmt) > 0) notify("Couldn't save the loan. Try again.", "neg"); };
   const removeSalary = async (id) => { haptic(14); notify(await delSalary(id) ? "Income entry deleted" : "Couldn't delete — try again", "neg"); };
   const removeExpense = async (id) => { haptic(14); notify(await delExpense(id) ? "Expense deleted" : "Couldn't delete — try again", "neg"); };
   const flipKind = async (e) => {
@@ -1593,6 +1660,7 @@ export default function App() {
         {tab === "goals" && (
           <main key="goals" className="page" style={{ "--dir": dir }}>
             <PageHeader title="Goals" sub="Targets you're saving toward" action={() => openSheet("goal")} actionLabel="New goal" />
+            {listsSetupNote}
             {goals.length > 0 && (
               <section className="card card--flush" style={{ marginBottom: 16 }}>
                 <div className="stat-strip">
@@ -1617,7 +1685,7 @@ export default function App() {
                       const pct = Math.min(100, (g.current_amount / g.target_amount) * 100);
                       const done = g.current_amount >= g.target_amount;
                       const amt = fundAmts[g.id] || "";
-                      const submit = () => { fundGoal(g, amt); setFundAmts(p => ({ ...p, [g.id]: "" })); };
+                      const submit = async () => { if (!(parseFloat(amt) > 0)) return; if (await fundGoal(g, amt)) setFundAmts(p => ({ ...p, [g.id]: "" })); else notify("Couldn't save. Check your connection and try again.", "neg"); };
                       return (
                         <article key={g.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1627,7 +1695,7 @@ export default function App() {
                               {done ? <span className="badge badge--pos" style={{ marginTop: 2 }}><Icon name="check" size={12} stroke={2.4} />Completed</span>
                                 : <div className="row__meta">{currency(g.target_amount - g.current_amount)} to go</div>}
                             </div>
-                            <button className="icon-btn icon-btn--danger" onClick={() => { haptic(14); delGoal(g.id); notify("Goal deleted"); }} aria-label={`Delete goal ${g.name}`} title="Delete goal"><Icon name="trash" size={16} /></button>
+                            <button className="icon-btn icon-btn--danger" onClick={async () => { haptic(14); if (await delGoal(g.id)) notify("Goal deleted"); else notify("Couldn't save. Check your connection and try again.", "neg"); }} aria-label={`Delete goal ${g.name}`} title="Delete goal"><Icon name="trash" size={16} /></button>
                           </div>
                           <div className="tile">
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
@@ -1661,6 +1729,7 @@ export default function App() {
         {tab === "lending" && (
           <main key="lending" className="page" style={{ "--dir": dir }}>
             <PageHeader title="Lending" sub="Money lent to friends & family" action={() => openSheet("loan")} actionLabel="New loan" />
+            {listsSetupNote}
 
             <section className="card card--flush" style={{ marginBottom: 16 }}>
               <div className="stat-strip">
@@ -1683,7 +1752,7 @@ export default function App() {
                     <div className="list">
                       {repaidLoans.map(l => (
                         <TxRow key={l.id} icon="check" iconClass="row__icon--lime" title={l.name} meta={`Lent ${fmtDate(l.date)}`} amount={l.amount} amountClass="pos" plain
-                          onDelete={() => delLoan(l.id)} deleteLabel={`Delete loan record for ${l.name}`} />
+                          onDelete={() => removeLoan(l)} deleteLabel={`Delete loan record for ${l.name}`} />
                       ))}
                     </div>
                   )}
@@ -1699,7 +1768,7 @@ export default function App() {
                       const repaid = l.repaid_amount || 0;
                       const pct = Math.min(100, (repaid / l.amount) * 100);
                       const amt = repayAmts[l.id] || "";
-                      const submit = () => { repayLoan(l.id, amt); setRepayAmts(p => ({ ...p, [l.id]: "" })); };
+                      const submit = async () => { if (!(parseFloat(amt) > 0)) return; if (await repayLoan(l, amt)) setRepayAmts(p => ({ ...p, [l.id]: "" })); else notify("Couldn't save. Check your connection and try again.", "neg"); };
                       return (
                         <article key={l.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                           <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
@@ -1708,7 +1777,7 @@ export default function App() {
                               <div className="row__title" style={{ fontSize: 16 }}>{l.name}</div>
                               <div className="row__meta">{fmtDate(l.date)}{l.note ? ` · ${l.note}` : ""}</div>
                             </div>
-                            <button className="icon-btn icon-btn--danger" onClick={() => delLoan(l.id)} aria-label={`Delete loan to ${l.name}`} title="Delete loan"><Icon name="trash" size={16} /></button>
+                            <button className="icon-btn icon-btn--danger" onClick={() => removeLoan(l)} aria-label={`Delete loan to ${l.name}`} title="Delete loan"><Icon name="trash" size={16} /></button>
                           </div>
                           <div className="tile">
                             <div className="eyebrow">Still owed</div>
@@ -1728,7 +1797,7 @@ export default function App() {
                             </span>
                             <button className="btn btn--accent btn--sm" style={{ height: 40 }} onClick={submit} disabled={!(parseFloat(amt) > 0)}>Repay</button>
                           </div>
-                          <button className="btn btn--outline btn--sm btn--block" onClick={() => { haptic(12); markLoanRepaid(l.id); notify(`${l.name} marked as repaid`); }}><Icon name="check" size={15} /> Mark fully repaid</button>
+                          <button className="btn btn--outline btn--sm btn--block" onClick={async () => { haptic(12); if (await markLoanRepaid(l)) notify(`${l.name} marked as repaid`); else notify("Couldn't save. Check your connection and try again.", "neg"); }}><Icon name="check" size={15} /> Mark fully repaid</button>
                         </article>
                       );
                     })}
@@ -2163,14 +2232,34 @@ function CategoryBreakdown({ data }) {
 function FinDateSelector({ value, onChange, label = "Date" }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  const popRef = useRef(null);
 
   useEffect(() => {
-    const handleClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handleClick = (e) => { if (!ref.current?.contains(e.target) && !popRef.current?.contains(e.target)) setOpen(false); };
     const handleKey = (e) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", handleClick);
     document.addEventListener("keydown", handleKey);
     return () => { document.removeEventListener("mousedown", handleClick); document.removeEventListener("keydown", handleKey); };
   }, []);
+
+  // The calendar renders in a portal on <body>, so a scrolling sheet or card can't clip it. On wider screens it's
+  // pinned under the field (or above it when there's no room below); on phones CSS turns it into a bottom sheet.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const pop = popRef.current, btn = ref.current;
+      if (!pop || !btn) return;
+      if (window.innerWidth <= 600) { pop.style.top = pop.style.left = ""; return; }
+      const r = btn.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight, gap = 8;
+      const below = r.bottom + gap + h <= window.innerHeight - gap || r.top - gap - h < gap;
+      pop.style.top = `${below ? r.bottom + gap : r.top - gap - h}px`;
+      pop.style.left = `${Math.min(Math.max(gap, r.left), window.innerWidth - w - gap)}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [open]);
 
   const [y, m, d] = value ? value.split("-").map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate()];
   const dateObj = new Date(y, m - 1, d);
@@ -2205,9 +2294,9 @@ function FinDateSelector({ value, onChange, label = "Date" }) {
         <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
       </button>
 
-      {open && <div className="datepick__backdrop" onClick={() => setOpen(false)} />}
-      {open && (
-        <div className="datepick__pop" role="dialog" aria-label={label}>
+      {open && createPortal(<>
+        <div className="datepick__backdrop" onClick={() => setOpen(false)} />
+        <div className="datepick__pop" ref={popRef} role="dialog" aria-label={label}>
           <div className="datepick__head">
             <span>{viewDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>
             <div style={{ display: "flex", gap: 4 }}>
@@ -2225,7 +2314,7 @@ function FinDateSelector({ value, onChange, label = "Date" }) {
             })}
           </div>
         </div>
-      )}
+      </>, document.body)}
     </div>
   );
 }

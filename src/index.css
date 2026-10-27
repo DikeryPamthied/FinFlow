@@ -936,11 +936,12 @@ input[type="number"] {
 .datepick__btn[aria-expanded="true"] { background: var(--surface); border-color: var(--ink); }
 .datepick__btn svg { color: var(--text-3); flex-shrink: 0; }
 
+/* Rendered on <body> and placed by FinDateSelector, so sheets and cards never clip it */
 .datepick__pop {
-  position: absolute;
-  top: calc(100% + 8px);
+  position: fixed;
+  top: 0;
   left: 0;
-  z-index: 50;
+  z-index: 120;
   width: 292px;
   background: var(--surface);
   border-radius: var(--r-md);
