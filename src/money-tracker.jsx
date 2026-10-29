@@ -55,9 +55,11 @@ const catMeta = (tag) => CATEGORIES.find(c => c.id === tag) || CATEGORIES[CATEGO
 const NEED_CATEGORIES = ["Food", "Transport", "Bills", "Health"];
 const kindFor = (tag) => (NEED_CATEGORIES.includes(tag) ? "need" : "want");
 
-// Budget plan defaults: 10% tithe; needs and wants as monthly spending limits (% of salary)
-const DEFAULT_PLAN = { titheOn: true, tithePct: 10, needsPct: 50, wantsPct: 30, saved: false };
+// Budget plan defaults: 10% tithe off the top, then half of what's left to savings and half to spend.
+// needsShare is the needs part of the spending half (wants get the rest).
+const DEFAULT_PLAN = { titheOn: true, tithePct: 10, savingsPct: 50, needsShare: 50, saved: false };
 const pctOf = (v) => Math.max(0, Math.min(100, parseFloat(v) || 0));
+const REPAY_OPTIONS = [["both", "Both equally"], ["need", "Needs"], ["want", "Wants"]];
 const DESTINATIONS = { Emergency: { label: "Emergency fund", icon: "shield" }, Investment: { label: "Investments", icon: "trend" } };
 
 const TAB_IDS = ["dashboard", "expenses", "savings", "goals", "lending", "history"];
@@ -79,27 +81,41 @@ const loadData = () => (loadingData ??= fetchData().finally(() => { loadingData 
 
 async function fetchData() {
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { salaryEntries: [], expenses: [], transfers: [], plan: DEFAULT_PLAN, schemaReady: true, goals: [], loans: [], listsReady: false };
-  const [salRes, expRes, planRes, trRes, goalRes, loanRes] = await Promise.all([
+  if (!user) return { salaryEntries: [], expenses: [], transfers: [], plan: DEFAULT_PLAN, schemaReady: true, splitReady: false, goals: [], loans: [], listsReady: false };
+  const [salRes, expRes, planRes, trRes, goalRes, loanRes, splitSal, splitPlan] = await Promise.all([
     supabase.from('salary_entries').select('*').eq('user_id', user.id).order('date', { ascending: false }),
     supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false }),
     supabase.from('budget_settings').select('*').eq('user_id', user.id).maybeSingle(),
     supabase.from('savings_transfers').select('*').eq('user_id', user.id).order('date', { ascending: false }),
     supabase.from('goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
     supabase.from('loans').select('*').eq('user_id', user.id).order('date', { ascending: false }),
+    // Columns added by supabase/salary_split_setup.sql; an error here means it hasn't been run yet
+    supabase.from('salary_entries').select('needs_alloc, repay_from').limit(1),
+    supabase.from('budget_settings').select('savings_pct, needs_share').limit(1),
   ]);
   const p = planRes.data;
+  // Plans saved before the savings/spending split: keep their needs-to-wants ratio
+  const oldShare = p && parseFloat(p.needs_pct) + parseFloat(p.wants_pct) > 0 ? Math.round(parseFloat(p.needs_pct) / (parseFloat(p.needs_pct) + parseFloat(p.wants_pct)) * 100) : DEFAULT_PLAN.needsShare;
   // Goals and loans live in the database once supabase/goals_loans_setup.sql has been run; until then they stay in this browser
   const listsReady = !goalRes.error && !loanRes.error;
   let goals = goalRes.data || [], loans = loanRes.data || [];
   if (listsReady) [goals, loans] = await uploadLocalLists(user.id, goals, loans);
   return {
-    salaryEntries: salRes.data?.map(s => ({ ...s, amount: parseFloat(s.amount), tithe: parseFloat(s.tithe) || 0, wantsAlloc: parseFloat(s.wants_alloc) || 0, savingsAlloc: parseFloat(s.savings_alloc) || 0, savingsTag: s.savings_tag })) || [],
+    salaryEntries: salRes.data?.map(s => ({
+      ...s, amount: parseFloat(s.amount), tithe: parseFloat(s.tithe) || 0, savingsAlloc: parseFloat(s.savings_alloc) || 0, savingsTag: s.savings_tag,
+      // Salaries added before the split have no stored needs/wants share; the current plan fills it in
+      needsAlloc: s.needs_alloc == null ? null : parseFloat(s.needs_alloc), wantsAlloc: parseFloat(s.wants_alloc) || 0, repayFrom: s.repay_from || null,
+    })) || [],
     expenses: expRes.data?.map(e => ({ ...e, amount: parseFloat(e.amount), kind: e.kind === "need" ? "need" : "want" })) || [],
     transfers: trRes.data?.map(t => ({ ...t, amount: parseFloat(t.amount) })) || [],
-    plan: p ? { titheOn: p.tithe_on, tithePct: parseFloat(p.tithe_pct), needsPct: parseFloat(p.needs_pct), wantsPct: parseFloat(p.wants_pct), saved: true } : DEFAULT_PLAN,
+    plan: p ? {
+      titheOn: p.tithe_on, tithePct: parseFloat(p.tithe_pct),
+      savingsPct: p.savings_pct == null ? DEFAULT_PLAN.savingsPct : parseFloat(p.savings_pct),
+      needsShare: p.needs_share == null ? oldShare : parseFloat(p.needs_share), saved: true,
+    } : DEFAULT_PLAN,
     // The budget tables come from supabase/budget_setup.sql; until it has been run, saving plans and moves is unavailable
     schemaReady: !planRes.error && !trRes.error,
+    splitReady: !planRes.error && !splitSal.error && !splitPlan.error,
     goals: listsReady ? goals.map(toGoal) : readLocalArray('finflow_goals'),
     loans: listsReady ? loans.map(toLoan) : readLocalArray('finflow_loans'),
     listsReady,
@@ -146,15 +162,62 @@ function computeTotals(salaryEntries, expenses, transfers) {
   return { income, tithe, spent, emergency, invested, savings: income - tithe - spent - emergency - invested };
 }
 
-// This month's needs / wants limits come from the plan and the month's salary (extra income excluded)
-function monthBudget(group, plan) {
-  const salary = sum(group.entries.filter(e => e.savingsTag !== "Extra"), e => e.amount);
-  const make = (kind, pct) => {
-    const limit = salary * pct / 100;
-    const spent = sum(group.expenses.filter(e => e.kind === kind), e => e.amount);
-    return { limit, spent, left: limit - spent, pct: limit > 0 ? Math.min(100, (spent / limit) * 100) : spent > 0 ? 100 : 0, over: spent > limit };
-  };
-  return { salary, needs: make("need", plan.needsPct), wants: make("want", plan.wantsPct) };
+// How one salary splits: tithe off the top, then savings and the spending half (needs + wants). Extra income all goes to savings.
+function splitSalary(amount, tithe, plan) {
+  const pot = (amount - tithe) * (1 - plan.savingsPct / 100);
+  const needs = +(pot * plan.needsShare / 100).toFixed(2);
+  const wants = +(pot - needs).toFixed(2);
+  return { needs, wants, savings: +(amount - tithe - needs - wants).toFixed(2) };
+}
+const allocOf = (e, plan) => e.savingsTag === "Extra" ? { needs: 0, wants: 0 }
+  : e.needsAlloc != null ? { needs: e.needsAlloc, wants: e.wantsAlloc } : splitSalary(e.amount, e.tithe || 0, plan);
+
+// Needs and wants are wallets that run month to month. Unspent money rolls into next month. Going below zero is
+// covered by savings, and the month's first salary pays that back before topping the wallets up again: split equally,
+// or all from needs or all from wants, as chosen when that salary was added.
+function walkBudget(salaryEntries, expenses, plan, untilKey) {
+  const groups = groupByMonth(salaryEntries, expenses);
+  const keys = groups.map(g => g.key);
+  const months = {};
+  if (keys.length === 0) return { months, needs: 0, wants: 0 };
+  const last = keys[0] > untilKey ? keys[0] : untilKey;
+  const byKey = Object.fromEntries(groups.map(g => [g.key, g]));
+  let needs = 0, wants = 0;
+  for (let k = keys[keys.length - 1]; k <= last; k = addMonths(k, 1)) {
+    const g = byKey[k] || { entries: [], expenses: [] };
+    const salaries = g.entries.filter(e => e.savingsTag !== "Extra").sort((a, b) => a.date.localeCompare(b.date));
+    const carry = { needs, wants };
+    const debt = Math.max(0, -needs) + Math.max(0, -wants);
+    let repaid = 0, repayFrom = null;
+    if (salaries.length > 0) {
+      const alloc = salaries.reduce((s, e) => { const a = allocOf(e, plan); return { needs: s.needs + a.needs, wants: s.wants + a.wants }; }, { needs: 0, wants: 0 });
+      needs = Math.max(0, needs) + alloc.needs;
+      wants = Math.max(0, wants) + alloc.wants;
+      if (debt > 0) {
+        repaid = debt;
+        repayFrom = salaries.find(e => e.repayFrom)?.repayFrom || "both";
+        if (repayFrom === "need") needs -= debt;
+        else if (repayFrom === "want") wants -= debt;
+        else { needs -= debt / 2; wants -= debt / 2; }
+      }
+    }
+    const avail = { needs, wants };
+    const spent = { needs: sum(g.expenses.filter(e => e.kind === "need"), e => e.amount), wants: sum(g.expenses.filter(e => e.kind !== "need"), e => e.amount) };
+    needs -= spent.needs;
+    wants -= spent.wants;
+    months[k] = { carry, debt, repaid, repayFrom, avail, spent, end: { needs, wants }, hasSalary: salaries.length > 0 };
+  }
+  return { months, needs, wants };
+}
+
+const EMPTY_MONTH = { carry: { needs: 0, wants: 0 }, debt: 0, repaid: 0, repayFrom: null, avail: { needs: 0, wants: 0 }, spent: { needs: 0, wants: 0 }, end: { needs: 0, wants: 0 }, hasSalary: false };
+
+// One wallet as the screens show it: what was there to spend this month, what's used, and what's left (negative = covered by savings)
+function walletView(m, kind) {
+  const limit = m.avail[kind], spent = m.spent[kind], left = m.end[kind];
+  const carried = m.hasSalary ? Math.max(0, m.carry[kind]) : m.carry[kind];
+  const repaid = !m.repaid ? 0 : m.repayFrom === "both" ? m.repaid / 2 : m.repayFrom === kind.slice(0, -1) ? m.repaid : 0;
+  return { limit, spent, left, carried, repaid, over: left < 0, pct: limit > 0 ? Math.min(100, (spent / limit) * 100) : spent > 0 ? 100 : 0 };
 }
 
 function groupByMonth(salaryEntries, expenses) {
@@ -391,6 +454,7 @@ export default function App() {
   const [transfers, setTransfers] = useState([]);
   const [plan, setPlan] = useState(DEFAULT_PLAN);
   const [schemaReady, setSchemaReady] = useState(true);
+  const [splitReady, setSplitReady] = useState(true);
   const [goals, setGoals] = useState([]);
   const [loans, setLoans] = useState([]);
   const [listsReady, setListsReady] = useState(true);
@@ -401,6 +465,7 @@ export default function App() {
   const [sAmt, setSAmt] = useState("");
   const [sDate, setSDate] = useState(localToday);
   const [incType, setIncType] = useState("Salary");
+  const [repayFrom, setRepayFrom] = useState("both");
 
   // Expense form
   const [eName, setEName] = useState("");
@@ -541,12 +606,18 @@ export default function App() {
     if (!session) return;
     loadData().then(data => {
       setSalaryEntries(data.salaryEntries); setExpenses(data.expenses); setTransfers(data.transfers);
-      setPlan(data.plan); setSchemaReady(data.schemaReady);
+      setPlan(data.plan); setSchemaReady(data.schemaReady); setSplitReady(data.splitReady);
       setGoals(data.goals); setLoans(data.loans); setListsReady(data.listsReady); setLoaded(true);
     });
   }, [session]);
 
-  const T = useMemo(() => computeTotals(salaryEntries, expenses, transfers), [salaryEntries, expenses, transfers]);
+  const walk = useMemo(() => walkBudget(salaryEntries, expenses, plan, monthKey(localToday())), [salaryEntries, expenses, plan]);
+  // Savings is what's left once the money still sitting in the needs and wants wallets is counted out
+  const T = useMemo(() => {
+    const t = computeTotals(salaryEntries, expenses, transfers);
+    const wallets = Math.max(0, walk.needs) + Math.max(0, walk.wants);
+    return { ...t, wallets, savings: t.savings - wallets };
+  }, [salaryEntries, expenses, transfers, walk]);
   const groups = useMemo(() => groupByMonth(salaryEntries, expenses), [salaryEntries, expenses]);
 
   const prevAmt = parseFloat(sAmt) || 0;
@@ -554,7 +625,11 @@ export default function App() {
   const isExtra = incType === "Extra";
   const tithePct = isExtra || !plan.titheOn ? 0 : plan.tithePct;
   const pTithe = prevAmt * tithePct / 100;
-  const pSavings = prevAmt - pTithe;
+  const pSplit = isExtra ? { needs: 0, wants: 0, savings: prevAmt } : splitSalary(prevAmt, pTithe, plan);
+  // Overspending this salary pays back to savings: only when it's the first salary of its month
+  const sMonth = walk.months[monthKey(sDate)];
+  const pDebt = isExtra || sMonth?.hasSalary ? 0
+    : sMonth ? sMonth.debt : Math.max(0, -walk.needs) + Math.max(0, -walk.wants);
 
   // ── Derived views (presentation only — totals above remain the source of truth) ──
   const curKey = monthKey(localToday());
@@ -566,7 +641,10 @@ export default function App() {
   const mSpent = sum(thisMonth.expenses, e => e.amount);
   const mTithe = sum(thisMonth.entries, e => e.tithe);
   const mKept = mIncome - mTithe - mSpent; // what this month added to savings
-  const budget = monthBudget(thisMonth, plan);
+  const curWallets = walk.months[curKey];
+  const budget = curWallets
+    ? { active: curWallets.hasSalary || curWallets.avail.needs !== 0 || curWallets.avail.wants !== 0, salary: sum(thisMonth.entries.filter(e => e.savingsTag !== "Extra"), e => e.amount), needs: walletView(curWallets, "needs"), wants: walletView(curWallets, "wants") }
+    : { active: false, salary: 0, needs: walletView(EMPTY_MONTH, "needs"), wants: walletView(EMPTY_MONTH, "wants") };
   const lmSpent = sum(lastMonth.expenses, e => e.amount);
   const spentDelta = lmSpent > 0 ? ((mSpent - lmSpent) / lmSpent) * 100 : null;
 
@@ -616,21 +694,26 @@ export default function App() {
   }, [transfers]);
   const savings12 = sum(savingsSeries, d => d.saved);
 
-  // Salary: tithe (if on) is taken off the top and the rest goes to savings. Extra income: all to savings.
+  // Salary: tithe (if on) off the top, then the plan's split between savings, needs and wants. Extra income: all to savings.
+  // The split is stored with the salary so later plan changes don't rewrite past months.
   const addSalary = async () => {
     const amount = parseFloat(sAmt);
     if (!amount || amount <= 0 || !sDate || !session) return;
     const isExtra = incType === "Extra";
     const tithe = isExtra || !plan.titheOn ? 0 : +(amount * plan.tithePct / 100).toFixed(2);
-    const savingsAlloc = +(amount - tithe).toFixed(2);
+    const split = isExtra ? { needs: 0, wants: 0, savings: +(amount - tithe).toFixed(2) } : splitSalary(amount, tithe, plan);
     const tag = isExtra ? "Extra" : "Salary";
+    const repay = pDebt > 0 ? repayFrom : null;
 
-    const { data, error } = await supabase.from('salary_entries').insert([{
-      user_id: session.user.id, date: sDate, amount, savings_tag: tag, tithe, wants_alloc: 0, savings_alloc: savingsAlloc
-    }]).select();
+    const row = { user_id: session.user.id, date: sDate, amount, savings_tag: tag, tithe, wants_alloc: split.wants, savings_alloc: split.savings };
+    if (splitReady) Object.assign(row, { needs_alloc: split.needs, repay_from: repay }); // columns from supabase/salary_split_setup.sql
+    const { data, error } = await supabase.from('salary_entries').insert([row]).select();
     if (!error && data) {
-      setSalaryEntries(prev => [{ id: data[0].id, date: sDate, amount, savingsTag: tag, tithe, wantsAlloc: 0, savingsAlloc }, ...prev]);
-      setSAmt(""); setSDate(localToday());
+      setSalaryEntries(prev => [{
+        id: data[0].id, date: sDate, amount, savingsTag: tag, tithe, savingsAlloc: split.savings,
+        needsAlloc: splitReady ? split.needs : null, wantsAlloc: split.wants, repayFrom: splitReady ? repay : null,
+      }, ...prev]);
+      setSAmt(""); setSDate(localToday()); setRepayFrom("both");
       return true;
     }
     return false;
@@ -691,11 +774,18 @@ export default function App() {
 
   const savePlan = async () => {
     if (!session || !schemaReady) return false;
-    const next = { titheOn: draft.titheOn, tithePct: pctOf(draft.tithePct), needsPct: pctOf(draft.needsPct), wantsPct: pctOf(draft.wantsPct), saved: true };
+    // Without the savings_pct column (supabase/salary_split_setup.sql) the savings share stays at the default
+    const savingsPct = splitReady ? pctOf(draft.savingsPct) : DEFAULT_PLAN.savingsPct;
+    const next = { titheOn: draft.titheOn, tithePct: pctOf(draft.tithePct), savingsPct, needsShare: pctOf(draft.needsShare), saved: true };
+    // needs_pct / wants_pct (% of the whole salary) are kept filled in for older versions of the app
+    const spend = (100 - (next.titheOn ? next.tithePct : 0)) * (1 - next.savingsPct / 100);
+    const row = {
+      user_id: session.user.id, tithe_on: next.titheOn, tithe_pct: next.tithePct, updated_at: new Date().toISOString(),
+      needs_pct: +(spend * next.needsShare / 100).toFixed(2), wants_pct: +(spend * (100 - next.needsShare) / 100).toFixed(2),
+      ...(splitReady ? { savings_pct: next.savingsPct, needs_share: next.needsShare } : {}),
+    };
     setPlanSaving(true);
-    const { error } = await supabase.from('budget_settings').upsert({
-      user_id: session.user.id, tithe_on: next.titheOn, tithe_pct: next.tithePct, needs_pct: next.needsPct, wants_pct: next.wantsPct, updated_at: new Date().toISOString()
-    });
+    const { error } = await supabase.from('budget_settings').upsert(row);
     setPlanSaving(false);
     if (error) return false;
     setPlan(next);
@@ -982,13 +1072,13 @@ export default function App() {
   const submitTransfer = async () => { if (await addTransfer()) { haptic(12); notify(`Moved to ${DESTINATIONS[tDest].label.toLowerCase()}`); closeSheet(); } };
   const removeTransfer = async (id) => { haptic(14); notify(await delTransfer(id) ? "Move undone, back in savings" : "Couldn't delete — try again", "neg"); };
   const submitPlan = async () => { if (await savePlan()) { haptic(12); notify("Budget plan saved"); closeSheet(); } else notify("Couldn't save — try again", "neg"); };
-  const openPlan = () => { setDraft({ titheOn: plan.titheOn, tithePct: String(plan.tithePct), needsPct: String(plan.needsPct), wantsPct: String(plan.wantsPct) }); openSheet("plan"); };
+  const openPlan = () => { setDraft({ titheOn: plan.titheOn, tithePct: String(plan.tithePct), savingsPct: String(plan.savingsPct), needsShare: String(plan.needsShare) }); openSheet("plan"); };
   const openMove = (dest) => { setTDest(dest); openSheet("move"); };
 
   const userName = session.user?.email?.split("@")[0] || "there";
   const pageTitle = tab === "dashboard" ? "Dashboard" : TABS.find(t => t.id === tab)?.label;
   const incomeHint = isExtra ? "Extra income goes straight to your savings."
-    : plan.titheOn ? `${plan.tithePct}% tithe comes off the top, the rest goes to your savings.` : "Your salary goes straight to your savings.";
+    : `${plan.titheOn ? `${plan.tithePct}% tithe comes off the top. Of the rest, ` : ""}${plan.savingsPct}% goes to savings and ${100 - plan.savingsPct}% to needs and wants.`;
 
   const renderIncomeForm = (inSheet) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1015,13 +1105,16 @@ export default function App() {
       <div className="tile">
         <div className="stack" aria-hidden="true">
           {tithePct > 0 && <span style={{ flexGrow: tithePct, background: "var(--text-3)" }} />}
-          <span style={{ flexGrow: 100 - tithePct, background: "var(--ink)" }} />
+          <span style={{ flexGrow: Math.max(0.001, pSplit.savings), background: "var(--text-2)" }} />
+          {pSplit.needs > 0 && <span style={{ flexGrow: pSplit.needs, background: "var(--ink)" }} />}
+          {pSplit.wants > 0 && <span style={{ flexGrow: pSplit.wants, background: "var(--lime-chart)" }} />}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 14 }}>
           {[
             ...(tithePct > 0 ? [[`Tithe · ${tithePct}%`, pTithe, "var(--text-3)"]] : []),
-            ["To savings", pSavings, "var(--ink)"],
-            ["New savings balance", T.savings + pSavings, null],
+            ["To savings", pSplit.savings, "var(--text-2)"],
+            ...(isExtra ? [] : [["Needs", pSplit.needs, "var(--ink)"], ["Wants", pSplit.wants, "var(--lime-chart)"]]),
+            ["New savings balance", T.savings + pSplit.savings + Math.min(pDebt, pSplit.needs + pSplit.wants), null],
           ].map(([lbl, val, col]) => (
             <div key={lbl}>
               <div className="legend__item eyebrow">{col && <span className="dot dot--sq" style={{ background: col }} />}{lbl}</div>
@@ -1030,6 +1123,14 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {pDebt > 0 && (
+        <div className="field">
+          <span className="field__label">Pay back savings</span>
+          <span className="card__sub">You overspent by <b className="num" style={{ color: "var(--neg)" }}>{currency(pDebt)}</b> and savings covered it. This salary pays it back from:</span>
+          <Segmented options={REPAY_OPTIONS} value={repayFrom} onChange={setRepayFrom} label="Pay back savings from" />
+        </div>
+      )}
 
       <button className={`btn btn--primary${inSheet ? " btn--block" : ""}`} onClick={submitIncome} disabled={!hasPrev} style={inSheet ? undefined : { alignSelf: "flex-start" }}>
         <Icon name="plus" size={16} /> Add {isExtra ? "extra income" : "salary"}
@@ -1070,9 +1171,9 @@ export default function App() {
       <div className="field">
         <span className="field__label">Counts as</span>
         <Segmented options={[["need", "Need"], ["want", "Want"]]} value={eKind} onChange={setEKind} label="Need or want" />
-        {budget.salary > 0 && (() => {
+        {budget.active && (() => {
           const b = eKind === "need" ? budget.needs : budget.wants;
-          return <span className="card__sub">{b.over ? `${eKind === "need" ? "Needs" : "Wants"} are over this month's limit by ` : `${eKind === "need" ? "Needs" : "Wants"} left this month: `}<b className="num" style={{ color: b.over ? "var(--neg)" : "var(--text)" }}>{currency(Math.abs(b.left))}</b> of {currency(b.limit)}</span>;
+          return <span className="card__sub">{b.over ? `${eKind === "need" ? "Needs" : "Wants"} are over by ` : `${eKind === "need" ? "Needs" : "Wants"} left this month: `}<b className="num" style={{ color: b.over ? "var(--neg)" : "var(--text)" }}>{currency(Math.abs(b.left))}</b>{b.over ? ", covered by savings" : <> of {currency(b.limit)}</>}</span>;
         })()}
       </div>
       <button className="btn btn--primary btn--block" onClick={submitExpense} disabled={!eName.trim() || !eAmt || parseFloat(eAmt) <= 0}>
@@ -1176,10 +1277,11 @@ export default function App() {
 
   // Plan preview uses this month's salary, else the latest one, else a round example
   const draftTithe = draft.titheOn ? pctOf(draft.tithePct) : 0;
-  const draftNeeds = pctOf(draft.needsPct);
-  const draftWants = pctOf(draft.wantsPct);
-  const draftLeft = 100 - draftTithe - draftNeeds - draftWants;
+  const draftSavingsPct = pctOf(draft.savingsPct);
+  const draftShare = pctOf(draft.needsShare);
   const exampleSalary = budget.salary || sortedSalaries.find(e => e.savingsTag !== "Extra")?.amount || 30000;
+  const exampleTithe = exampleSalary * draftTithe / 100;
+  const exampleSplit = splitSalary(exampleSalary, exampleTithe, { savingsPct: draftSavingsPct, needsShare: draftShare });
   const pctInput = (key, label) => (
     <span className="input-wrap">
       <input className="input num input--pct" type="number" inputMode="decimal" min="0" max="100" enterKeyHint="next" value={draft[key]} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))} aria-label={`${label} percentage`} />
@@ -1188,7 +1290,7 @@ export default function App() {
   );
   const planForm = (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <p className="card__sub" style={{ margin: 0 }}>Your salary goes into savings first. Needs and wants are monthly spending limits; whatever you don't spend stays saved.</p>
+      <p className="card__sub" style={{ margin: 0 }}>After tithe, each salary splits between savings and spending. Unspent needs and wants roll into next month. Overspending is covered by savings and paid back from your next salary.</p>
       <div className="field">
         <span className="field__label">Tithe</span>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -1198,41 +1300,41 @@ export default function App() {
       </div>
       <div className="form-row">
         <label className="field">
-          <span className="field__label">Needs</span>
-          {pctInput("needsPct", "Needs")}
-          <span className="card__sub">Rent, food, bills, travel</span>
+          <span className="field__label">Savings</span>
+          {pctInput("savingsPct", "Savings")}
+          <span className="card__sub">Of what's left after tithe. The rest is for spending.</span>
         </label>
         <label className="field">
-          <span className="field__label">Wants</span>
-          {pctInput("wantsPct", "Wants")}
-          <span className="card__sub">Fun, shopping, eating out</span>
+          <span className="field__label">Needs</span>
+          {pctInput("needsShare", "Needs share of spending")}
+          <span className="card__sub">Of the spending part. Wants get the other {100 - draftShare}%.</span>
         </label>
       </div>
       <div className="tile">
         <div className="stack" aria-hidden="true">
-          {draftTithe > 0 && <span style={{ flexGrow: draftTithe, background: "var(--text-3)" }} />}
-          {draftNeeds > 0 && <span style={{ flexGrow: draftNeeds, background: "var(--ink)" }} />}
-          {draftWants > 0 && <span style={{ flexGrow: draftWants, background: "var(--lime-chart)" }} />}
-          {draftLeft > 0 && <span style={{ flexGrow: draftLeft, background: "var(--surface-3)" }} />}
+          {exampleTithe > 0 && <span style={{ flexGrow: exampleTithe, background: "var(--text-3)" }} />}
+          {exampleSplit.savings > 0 && <span style={{ flexGrow: exampleSplit.savings, background: "var(--text-2)" }} />}
+          {exampleSplit.needs > 0 && <span style={{ flexGrow: exampleSplit.needs, background: "var(--ink)" }} />}
+          {exampleSplit.wants > 0 && <span style={{ flexGrow: exampleSplit.wants, background: "var(--lime-chart)" }} />}
         </div>
         <div className="card__sub" style={{ marginTop: 12 }}>On a <b className="num" style={{ color: "var(--text)" }}>{currency(exampleSalary)}</b> salary:</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginTop: 8 }}>
           {[
-            ...(draftTithe > 0 ? [[`Tithe · ${draftTithe}%`, draftTithe, "var(--text-3)"]] : []),
-            [`Needs limit · ${draftNeeds}%`, draftNeeds, "var(--ink)"],
-            [`Wants limit · ${draftWants}%`, draftWants, "var(--lime-chart)"],
-            [`Left to save · ${Math.max(0, draftLeft)}%`, Math.max(0, draftLeft), "var(--surface-3)"],
-          ].map(([lbl, pct, col]) => (
+            ...(draftTithe > 0 ? [[`Tithe · ${draftTithe}%`, exampleTithe, "var(--text-3)"]] : []),
+            ["Savings", exampleSplit.savings, "var(--text-2)"],
+            ["Needs", exampleSplit.needs, "var(--ink)"],
+            ["Wants", exampleSplit.wants, "var(--lime-chart)"],
+          ].map(([lbl, val, col]) => (
             <div key={lbl}>
               <div className="legend__item eyebrow"><span className="dot dot--sq" style={{ background: col }} />{lbl}</div>
-              <Money value={exampleSalary * pct / 100} className="money--md" style={{ marginTop: 2 }} />
+              <Money value={val} className="money--md" style={{ marginTop: 2 }} />
             </div>
           ))}
         </div>
       </div>
-      {draftLeft < 0 && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>That adds up to more than 100%. Lower one of them.</span></div>}
       {!schemaReady && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Saving a plan needs the one-time database setup first.</span></div>}
-      <button className="btn btn--primary btn--block" onClick={submitPlan} disabled={!schemaReady || draftLeft < 0 || planSaving}>
+      {schemaReady && !splitReady && <div className="alert alert--neg"><Icon name="alert" size={16} /><span>Run <b>supabase/salary_split_setup.sql</b> in your Supabase SQL editor to change the savings %. Until then it stays at {DEFAULT_PLAN.savingsPct}%.</span></div>}
+      <button className="btn btn--primary btn--block" onClick={submitPlan} disabled={!schemaReady || planSaving}>
         {planSaving ? <span className="spinner" /> : <><Icon name="check" size={16} /> Save plan</>}
       </button>
     </div>
@@ -1315,7 +1417,7 @@ export default function App() {
                 <span className="quick__circle" style={{ background: "var(--lime)", color: "var(--ink)" }}><Icon name="sliders" /></span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="card__title">Set up your budget plan</div>
-                  <div className="card__sub">Choose your tithe and how much of each salary can go to needs and wants.</div>
+                  <div className="card__sub">Choose your tithe, how much of each salary you save, and how the rest splits between needs and wants.</div>
                 </div>
                 <button className="btn btn--primary btn--sm" onClick={openPlan}>Set up</button>
               </section>
@@ -1335,14 +1437,16 @@ export default function App() {
                     <div key={lbl}>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8, fontSize: 12, fontWeight: 600 }}>
                         <span style={{ color: "var(--text-on-ink-2)" }}>{lbl} this month</span>
-                        <span className="num">{currency(b.spent)} <span style={{ color: "var(--text-on-ink-2)" }}>/ {currency(b.limit)}</span></span>
+                        {b.over
+                          ? <span className="num" style={{ color: "#ff8a80" }}>{currency(b.left)} <span style={{ color: "var(--text-on-ink-2)" }}>from savings</span></span>
+                          : <span className="num">{currency(b.spent)} <span style={{ color: "var(--text-on-ink-2)" }}>/ {currency(b.limit)}</span></span>}
                       </div>
                       <div className="meter" role="img" aria-label={`${lbl}: ${b.pct.toFixed(0)}% of this month's limit used`}>
                         {b.pct > 0 && <div className={`meter__fill${b.over ? " meter__fill--over" : ""}`} style={{ width: `${b.pct}%` }} />}
                       </div>
                     </div>
                   ))}
-                  {budget.salary === 0 && <div style={{ fontSize: 12, color: "var(--text-on-ink-2)" }}>Limits appear once this month's salary is recorded.</div>}
+                  {!budget.active && <div style={{ fontSize: 12, color: "var(--text-on-ink-2)" }}>Needs and wants fill up once a salary is recorded.</div>}
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
@@ -1496,7 +1600,7 @@ export default function App() {
         {/* ══ EXPENSES ══ */}
         {tab === "expenses" && (
           <main key="expenses" className="page" style={{ "--dir": dir }}>
-            <PageHeader title="Expenses" sub="Everything you've spent, taken from your savings" action={() => openSheet("expense")} actionLabel="Add expense" />
+            <PageHeader title="Expenses" sub="Everything you've spent from your needs and wants" action={() => openSheet("expense")} actionLabel="Add expense" />
 
             <section className="card" style={{ marginBottom: 16 }}>
               <div className="card__head" style={{ marginBottom: 18 }}>
@@ -1505,8 +1609,8 @@ export default function App() {
                   <div className="card__sub">{monthKeyLabel(curKey)} · <span className="num">{currency(mSpent)}</span> spent · <span className="num">{currency(T.spent)}</span> all time</div>
                 </div>
               </div>
-              {budget.salary === 0 ? (
-                <EmptyState icon="income" title="No salary recorded this month" text="Your needs and wants limits appear once this month's salary is added." />
+              {!budget.active ? (
+                <EmptyState icon="income" title="No salary recorded yet" text="Needs and wants fill up once a salary is added." />
               ) : (
                 <div className="budget-bars">
                   <BudgetBar label="Needs" b={budget.needs} color="var(--ink)" />
@@ -2083,13 +2187,18 @@ function Stat({ label, value, meta, tone }) {
 // A month's needs or wants limit: what's left up top, a bar of what's used, the figures underneath
 function BudgetBar({ label, b, color }) {
   const used = Math.round(b.limit > 0 ? (b.spent / b.limit) * 100 : 0);
+  const notes = [
+    b.carried > 0 && `${currency(b.carried)} rolled over`,
+    b.carried < 0 && `${currency(b.carried)} carried in`,
+    b.repaid > 0 && `${currency(b.repaid)} paid back to savings`,
+  ].filter(Boolean);
   return (
     <div className="budget-bar" data-over={b.over}>
       <div className="budget-bar__top">
         <span className="legend__item budget-bar__label"><span className="dot dot--sq" style={{ background: color }} />{label}</span>
         <span className="budget-bar__left">
-          <Money value={Math.abs(b.left)} className="money--lg" />
-          <span>{b.over ? "over" : "left"}</span>
+          <Money value={b.left} className="money--lg" />
+          <span>{b.over ? "from savings" : "left"}</span>
         </span>
       </div>
       <div className="budget-bar__track" role="img" aria-label={`${label}: ${used}% of ${currency(b.limit)} used`}>
@@ -2099,6 +2208,11 @@ function BudgetBar({ label, b, color }) {
         <span><b className="num">{currency(b.spent)}</b> used</span>
         <span className="num">{used}% of {currency(b.limit)}</span>
       </div>
+      {(notes.length > 0 || b.over) && (
+        <div className="budget-bar__foot" style={{ marginTop: 4 }}>
+          <span>{b.over ? `Overspent, so ${currency(-b.left)} came out of savings. Your next salary pays it back.` : notes.join(" · ")}</span>
+        </div>
+      )}
     </div>
   );
 }
