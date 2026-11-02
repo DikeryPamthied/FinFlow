@@ -210,6 +210,9 @@ function walkBudget(salaryEntries, expenses, plan, untilKey) {
   return { months, needs, wants };
 }
 
+// Money sitting in the wallets (an overspent wallet is already counted out of savings)
+const inWallets = (w) => Math.max(0, w.needs) + Math.max(0, w.wants);
+
 const EMPTY_MONTH = { carry: { needs: 0, wants: 0 }, debt: 0, repaid: 0, repayFrom: null, avail: { needs: 0, wants: 0 }, spent: { needs: 0, wants: 0 }, end: { needs: 0, wants: 0 }, hasSalary: false };
 
 // One wallet as the screens show it: what was there to spend this month, what's used, and what's left (negative = covered by savings)
@@ -615,7 +618,7 @@ export default function App() {
   // Savings is what's left once the money still sitting in the needs and wants wallets is counted out
   const T = useMemo(() => {
     const t = computeTotals(salaryEntries, expenses, transfers);
-    const wallets = Math.max(0, walk.needs) + Math.max(0, walk.wants);
+    const wallets = inWallets(walk);
     return { ...t, wallets, savings: t.savings - wallets };
   }, [salaryEntries, expenses, transfers, walk]);
   const groups = useMemo(() => groupByMonth(salaryEntries, expenses), [salaryEntries, expenses]);
@@ -640,11 +643,13 @@ export default function App() {
   const mIncome = sum(thisMonth.entries, e => e.amount);
   const mSpent = sum(thisMonth.expenses, e => e.amount);
   const mTithe = sum(thisMonth.entries, e => e.tithe);
-  const mKept = mIncome - mTithe - mSpent; // what this month added to savings
   const curWallets = walk.months[curKey];
+  // What this month added to savings: money that went into the wallets and is still there doesn't count
+  const mKept = mIncome - mTithe - mSpent - (curWallets ? inWallets(curWallets.end) - inWallets(curWallets.carry) : 0);
   const budget = curWallets
     ? { active: curWallets.hasSalary || curWallets.avail.needs !== 0 || curWallets.avail.wants !== 0, salary: sum(thisMonth.entries.filter(e => e.savingsTag !== "Extra"), e => e.amount), needs: walletView(curWallets, "needs"), wants: walletView(curWallets, "wants") }
     : { active: false, salary: 0, needs: walletView(EMPTY_MONTH, "needs"), wants: walletView(EMPTY_MONTH, "wants") };
+  budget.left = budget.needs.left + budget.wants.left; // needs + wants together, what's still there to spend
   const lmSpent = sum(lastMonth.expenses, e => e.amount);
   const spentDelta = lmSpent > 0 ? ((mSpent - lmSpent) / lmSpent) * 100 : null;
 
@@ -874,7 +879,7 @@ export default function App() {
     // One chronological list: income, expenses and money moved out of savings
     const lines = [
       ...s.map(x => ({ date: x.date, type: "Income", title: x.savingsTag === "Extra" ? "Extra income" : "Salary", category: "", kind: "",
-        amount: x.amount, note: x.tithe > 0 ? `Tithe ${num(x.tithe)} · ${num(x.amount - x.tithe)} to savings` : "All to savings" })),
+        amount: x.amount, note: splitNote(x, num) })),
       ...e.map(x => ({ date: x.date, type: "Expense", title: x.name, category: x.tag, kind: x.kind === "need" ? "Need" : "Want", amount: -x.amount, note: "" })),
       ...t.map(x => ({ date: x.date, type: "Set aside", title: `To ${DESTINATIONS[x.destination]?.label.toLowerCase() || x.destination}`, category: "", kind: "",
         amount: -x.amount, note: x.note || "" })),
@@ -882,7 +887,13 @@ export default function App() {
 
     const income = sum(s, x => x.amount), tithe = sum(s, x => x.tithe), spent = sum(e, x => x.amount);
     const needs = sum(e.filter(x => x.kind === "need"), x => x.amount), wants = spent - needs, setAside = sum(t, x => x.amount);
-    const kept = income - tithe - spent - setAside;
+    // Needs and wants still unspent at the start and end of the period; what's left in them isn't savings yet
+    const walletsAt = (key, side) => { const m = walk.months[key]; return m ? m[side] : side === "carry" ? { needs: 0, wants: 0 } : { needs: walk.needs, wants: walk.wants }; };
+    const [startKey, endKey] = expType === "Month" ? [expMonth, expMonth] : expType === "Date Range" ? [monthKey(expStart), monthKey(expEnd)] : [null, curKey];
+    const startW = startKey ? walletsAt(startKey, "carry") : { needs: 0, wants: 0 };
+    const endW = walletsAt(endKey, "end");
+    const spendLeft = endW.needs + endW.wants;
+    const kept = income - tithe - spent - setAside - (inWallets(endW) - inWallets(startW));
 
     if (format === 'csv') {
       const fix = (n) => (Number(n) || 0).toFixed(2); // plain numbers so spreadsheets can sum them
@@ -900,6 +911,9 @@ export default function App() {
         ["  Wants", fix(wants)],
         ["Set aside", fix(setAside)],
         ["Kept in savings", fix(kept)],
+        ["Spending money left", fix(spendLeft)],
+        ["  Needs", fix(endW.needs)],
+        ["  Wants", fix(endW.wants)],
         [],
         ["Date", "Type", "Description", "Category", "Need / Want", "Amount (INR)", "Details"],
         ...lines.map(l => [l.date, l.type, l.title, l.category, l.kind, fix(l.amount), l.note]),
@@ -955,7 +969,8 @@ export default function App() {
         doc.text(rs(val), x + 5, ty + 15.5);
       });
       doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(...TEXT2);
-      doc.text(`Tithe ${rs(tithe)}   ·   Needs ${rs(needs)}   ·   Wants ${rs(wants)}`, M, ty + 29);
+      doc.text(`Tithe ${rs(tithe)}   ·   Spent on needs ${rs(needs)}   ·   Spent on wants ${rs(wants)}`, M, ty + 28);
+      doc.text(`Spending money left ${rs(spendLeft)}   ·   Needs ${rs(endW.needs)}   ·   Wants ${rs(endW.wants)}`, M, ty + 33);
 
       // Transactions
       doc.setFont("helvetica", "bold").setFontSize(11).setTextColor(...INK);
@@ -1349,13 +1364,19 @@ export default function App() {
     plan: { title: "Budget plan", body: planForm },
   };
 
+  // How a salary was split, for its row and the statement: "Tithe … · … to savings · … to spend"
+  const splitNote = (e, fmt) => {
+    if (e.savingsTag === "Extra") return "All to savings";
+    const a = allocOf(e, plan), spend = a.needs + a.wants;
+    return [e.tithe > 0 && `Tithe ${fmt(e.tithe)}`, `${fmt(e.amount - (e.tithe || 0) - spend)} to savings`, `${fmt(spend)} to spend`].filter(Boolean).join(" · ");
+  };
   const salaryRowProps = (e, onDelete) => {
     const extra = e.savingsTag === "Extra";
     return {
       icon: "income",
       iconClass: extra ? "row__icon--lime" : "row__icon--ink",
       title: extra ? "Extra income" : "Salary",
-      meta: e.tithe > 0 ? `Tithe ${currency(e.tithe)} · ${currency(e.amount - e.tithe)} to savings` : `${fmtDate(e.date)} · all to savings`,
+      meta: splitNote(e, currency),
       amount: e.amount, positive: true, onDelete, deleteLabel: "Delete income entry",
     };
   };
@@ -1433,6 +1454,12 @@ export default function App() {
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {budget.active && (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, fontSize: 13, fontWeight: 600 }}>
+                      <span style={{ color: "var(--text-on-ink-2)" }}>Spending money left</span>
+                      <span className="num" style={{ fontSize: 16, color: budget.left < 0 ? "#ff8a80" : undefined }}>{currency(budget.left)}</span>
+                    </div>
+                  )}
                   {[["Needs", budget.needs], ["Wants", budget.wants]].map(([lbl, b]) => (
                     <div key={lbl}>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8, fontSize: 12, fontWeight: 600 }}>
@@ -1525,7 +1552,7 @@ export default function App() {
                   {[
                     ["Income", mIncome, "pos", `${thisMonth.entries.length} ${thisMonth.entries.length === 1 ? "entry" : "entries"}`],
                     ["Spent", mSpent, null, `${thisMonth.expenses.length} ${thisMonth.expenses.length === 1 ? "expense" : "expenses"}`],
-                    ["Kept in savings", mKept, mKept < 0 ? "neg" : null, "After tithe and spending"],
+                    ["Kept in savings", mKept, mKept < 0 ? "neg" : null, "After tithe, spending and money left to spend"],
                   ].map(([lbl, val, tone, meta]) => (
                     <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderTop: lbl === "Income" ? 0 : "1px solid var(--divider)", gap: 12 }}>
                       <div>
@@ -1608,6 +1635,12 @@ export default function App() {
                   <div className="card__title">This month's limits</div>
                   <div className="card__sub">{monthKeyLabel(curKey)} · <span className="num">{currency(mSpent)}</span> spent · <span className="num">{currency(T.spent)}</span> all time</div>
                 </div>
+                {budget.active && (
+                  <div style={{ textAlign: "right" }}>
+                    <Money value={budget.left} className={`money--lg ${budget.left < 0 ? "neg" : ""}`} />
+                    <div className="stat__meta">Spending money left</div>
+                  </div>
+                )}
               </div>
               {!budget.active ? (
                 <EmptyState icon="income" title="No salary recorded yet" text="Needs and wants fill up once a salary is added." />
