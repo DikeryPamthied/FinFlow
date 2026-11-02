@@ -1059,6 +1059,15 @@ export default function App() {
   const handleSignOut = () => supabase.auth.signOut();
   const sortedSalaries = [...salaryEntries].sort((a, b) => b.date.localeCompare(a.date));
   const moves = [...transfers].sort((a, b) => b.date.localeCompare(a.date));
+  // Where all your money sits; colours match the needs/wants bars and the salary split
+  const holdings = [
+    { id: "Savings", value: Math.max(0, T.savings), color: "var(--text-2)" },
+    { id: "Needs", value: Math.max(0, walk.needs), color: "var(--ink)" },
+    { id: "Wants", value: Math.max(0, walk.wants), color: "var(--lime-chart)" },
+    { id: "Emergency", value: Math.max(0, T.emergency), color: "var(--c-blue)" },
+    { id: "Investment", value: Math.max(0, T.invested), color: "var(--c-orange)" },
+  ];
+  const totalMoney = T.savings + T.wallets + T.emergency + T.invested; // = income − tithe − spending
 
   // Expense list: search, category filter, sort
   const expenseView = useMemo(() => {
@@ -1800,6 +1809,32 @@ export default function App() {
         {tab === "savings" && (
           <main key="savings" className="page" style={{ "--dir": dir }}>
             <PageHeader title="Savings" sub="What's left after tithe and spending. Move money into your emergency fund, investments, needs or wants." action={() => openMove("Emergency")} actionLabel="Move money" />
+
+            {/* Total money: everything you have, wherever it sits. An overspent wallet counts as 0 since savings already covered it. */}
+            <section className="card" style={{ marginBottom: 16 }}>
+              <div className="card__head" style={{ marginBottom: 14 }}>
+                <div>
+                  <div className="card__title">Total money</div>
+                  <div className="card__sub">Savings, needs, wants, emergency fund and investments together</div>
+                </div>
+                <Money value={totalMoney} className="money--lg" />
+              </div>
+              <div className="stack" style={{ height: 12 }} role="img" aria-label={`Total money ${currency(totalMoney)}, split by where it sits`}>
+                {holdings.some(h => h.value > 0)
+                  ? holdings.filter(h => h.value > 0).map(h => <span key={h.id} style={{ flexGrow: h.value, background: h.color }} />)
+                  : <span style={{ flexGrow: 1, background: "var(--surface-3)" }} />}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 12, marginTop: 16 }}>
+                {holdings.map(h => (
+                  <div key={h.id}>
+                    <div className="legend__item eyebrow"><span className="dot dot--sq" style={{ background: h.color }} />{POTS[h.id].label}</div>
+                    <Money value={h.value} className="money--md" style={{ marginTop: 2 }} />
+                    <div className="stat__meta num">{totalMoney > 0 ? ((h.value / totalMoney) * 100).toFixed(0) : 0}%</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
             <div className="split" style={{ marginBottom: 16 }}>
               <section className="card card--ink" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
                 <div>
